@@ -1,0 +1,23 @@
+job_metadata_field,job_metadata_type,csv_export_field,scrape_feed_field,civil_service_feed_field,ats_feed_field,notes
+entity_id,STRING,job_id,,,,Jobiqo internal ID. Maps to entity_id in GA/event tables
+external_id,STRING,External ID (strip N_ prefix),id,id,id,Feed hash ID. CSV has N_ prefix (e.g. 2_abc123) - strip it. Feeds have plain hash
+title,STRING,title,title,title,title,
+workflow_state,STRING,workflow_state,n/a (if in feed = published),n/a (if in feed = published),n/a (if in feed = published),Feed presence = published. CSV has actual state
+organization_id,STRING,organization_id,organization_id,jobiqo_id,organization_id,
+organization_profile_name,STRING,organization_profile_name,organization_name,n/a,organization_name,
+locations,STRING,locations,job_location,location,job_location,Civil Service uses location + multi_locations. Others use job_location
+employment_type,STRING,employment_type,working_pattern,working_pattern,working_pattern,
+occupational_fields,STRING,occupational_fields,category,category,category,From CSV export only - Jobiqo's occupational_fields label
+category,STRING,,occupation,occupation,occupation,NEW COLUMN - from feeds only. Kept separate from occupational_fields to avoid confusion with Jobiqo labelling
+contract_type,STRING,,contract_type,contract_type,contract_type,NEW COLUMN - from feeds only (e.g. Permanent / Temporary / Fixed Term)
+publishing_date,TIMESTAMP,publishing_date (dd/mm/yyyy hh:mm:ss),start_date,start_date,start_date,
+expiration_date,TIMESTAMP,expiration_date (dd/mm/yyyy hh:mm:ss),close_date,close_date,close_date,
+original_publishing_date,TIMESTAMP,Original publishing date (dd/mm/yyyy hh:mm:ss),n/a,n/a,n/a,NEW COLUMN - only in CSV export
+employer_type,STRING,Employer type (Industry),n/a,n/a,n/a,NEW COLUMN - only in CSV export
+salary_free_text,STRING,salary,salary_free_text,salary_free_text,salary_free_text,NEW COLUMN - free text salary string
+min_salary,FLOAT64,min_salary,salary/salary_min,salary/salary_min,salary/salary_min,NEW COLUMN
+max_salary,FLOAT64,max_salary,salary/salary_max,salary/salary_max,salary/salary_max,NEW COLUMN
+salary_exact,FLOAT64,n/a,salary/salary_exact,salary/salary_exact,salary/salary_exact,NEW COLUMN - only in feeds
+currency_code,STRING,currency_code,salary/salary_currency,salary/salary_currency,salary/salary_currency,NEW COLUMN
+salary_unit,STRING,salary_unit,salary/salary_type,salary/salary_type,salary/salary_type,NEW COLUMN - e.g. year
+last_updated,TIMESTAMP,n/a (auto-set),n/a (auto-set),n/a (auto-set),n/a (auto-set),Set automatically during sync

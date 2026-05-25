@@ -1,0 +1,36 @@
+name: Data Refresh (every 4 hours)
+
+on:
+  schedule:
+    # Run every 4 hours: 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+    - cron: '0 */4 * * *'
+  workflow_dispatch:  # Allow manual trigger from GitHub UI
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          pip install google-cloud-bigquery google-auth pyarrow db-dtypes requests python-dateutil pandas gspread google-auth-oauthlib
+
+      - name: Create service account file
+        run: |
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}' > service_account.json
+
+      - name: Run daily refresh
+        run: python scripts/daily_refresh.py
+
+      - name: Clean up credentials
+        if: always()
+        run: rm -f service_account.json
