@@ -75,6 +75,19 @@ SELECT
     orgs_event_name.industry
   )                                                                AS industry,
 
+  -- uk_region: matched events get it directly from t02 (which already does
+  -- its own postcode→city→HQ cascade). Orphan events recover via the same
+  -- HQ-postcode chain that the industry COALESCE uses — the GA4 event's
+  -- organization_id (then name) → t04_organisations.postcode → t04_postcodes.
+  -- The "(pseudo) X" cleanup is applied in the same way as t02.
+  COALESCE(
+    j.uk_region,
+    IF(orgs_event_id_region.region_name LIKE '(pseudo) %',
+       orgs_event_id_region.country_name, orgs_event_id_region.region_name),
+    IF(orgs_event_name_region.region_name LIKE '(pseudo) %',
+       orgs_event_name_region.country_name, orgs_event_name_region.region_name)
+  )                                                                AS uk_region,
+
   j.occupation,
   j.locations,
   j.employment_type,
@@ -121,6 +134,28 @@ LEFT JOIN (
   GROUP BY name_key
 ) AS orgs_event_name
   ON LOWER(TRIM(e.organization_name)) = orgs_event_name.name_key
+-- Region recovery for orphan events: same chain as industry, but pulling
+-- region_name + country_name from t04_postcodes (via the org's HQ postcode).
+LEFT JOIN (
+  SELECT o.organization_id, p.region_name, p.country_name
+  FROM `site-monitoring-421401.JPD.t04_organisations` o
+  LEFT JOIN `site-monitoring-421401.JPD.t04_postcodes` p
+    ON UPPER(TRIM(o.postcode)) = p.postcode
+  WHERE o.postcode IS NOT NULL
+) AS orgs_event_id_region
+  ON CAST(e.organization_id AS STRING) = orgs_event_id_region.organization_id
+LEFT JOIN (
+  SELECT
+    LOWER(TRIM(o.organisation_name)) AS name_key,
+    ANY_VALUE(p.region_name)  AS region_name,
+    ANY_VALUE(p.country_name) AS country_name
+  FROM `site-monitoring-421401.JPD.t04_organisations` o
+  LEFT JOIN `site-monitoring-421401.JPD.t04_postcodes` p
+    ON UPPER(TRIM(o.postcode)) = p.postcode
+  WHERE o.organisation_name IS NOT NULL AND o.postcode IS NOT NULL
+  GROUP BY name_key
+) AS orgs_event_name_region
+  ON LOWER(TRIM(e.organization_name)) = orgs_event_name_region.name_key
 
 UNION ALL
 
@@ -149,6 +184,7 @@ SELECT
 
   j.source_feed,
   j.industry,
+  j.uk_region,
   j.occupation,
   j.locations,
   j.employment_type,

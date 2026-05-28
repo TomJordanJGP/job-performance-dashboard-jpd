@@ -142,6 +142,63 @@ live_window AS (
 ),
 
 -- ---------------------------------------------------------------------------
+-- 4b. Region-resolution helpers — Tier 2 (city/town → region) and Tier 3
+--     (org HQ postcode → region). Tier 1 is just a direct join on t04_postcodes
+--     so doesn't need a CTE. Names are case-normalised and disambiguated by
+--     picking the dominant region per name (the city/town name with the most
+--     postcodes wins where the same name appears in multiple regions — e.g.
+--     "Newport" exists in Wales and Isle of Wight; Wales wins by row count).
+--     All non-English ONSPD rows label `region_name` as "(pseudo) Scotland"
+--     etc — the cleanup pattern is applied at the SELECT, not here.
+-- ---------------------------------------------------------------------------
+city_to_region AS (
+  WITH agg AS (
+    SELECT
+      LOWER(TRIM(city_name)) AS name_key,
+      region_name,
+      country_name,
+      COUNT(*) AS n
+    FROM `site-monitoring-421401.JPD.t04_postcodes`
+    WHERE city_name IS NOT NULL AND region_name IS NOT NULL
+    GROUP BY name_key, region_name, country_name
+  )
+  SELECT name_key, region_name, country_name FROM (
+    SELECT name_key, region_name, country_name,
+           ROW_NUMBER() OVER (PARTITION BY name_key ORDER BY n DESC) AS rn
+    FROM agg
+  )
+  WHERE rn = 1
+),
+town_to_region AS (
+  WITH agg AS (
+    SELECT
+      LOWER(TRIM(town_name)) AS name_key,
+      region_name,
+      country_name,
+      COUNT(*) AS n
+    FROM `site-monitoring-421401.JPD.t04_postcodes`
+    WHERE town_name IS NOT NULL AND region_name IS NOT NULL
+    GROUP BY name_key, region_name, country_name
+  )
+  SELECT name_key, region_name, country_name FROM (
+    SELECT name_key, region_name, country_name,
+           ROW_NUMBER() OVER (PARTITION BY name_key ORDER BY n DESC) AS rn
+    FROM agg
+  )
+  WHERE rn = 1
+),
+hq_to_region AS (
+  SELECT
+    o.organization_id,
+    p.region_name,
+    p.country_name
+  FROM `site-monitoring-421401.JPD.t04_organisations` o
+  LEFT JOIN `site-monitoring-421401.JPD.t04_postcodes` p
+    ON UPPER(TRIM(o.postcode)) = p.postcode
+  WHERE o.postcode IS NOT NULL
+),
+
+-- ---------------------------------------------------------------------------
 -- 5. FULL OUTER JOIN — captures all three segments. Carries both sides'
 --    fields prefixed so the final SELECT can apply COALESCE rules.
 -- ---------------------------------------------------------------------------
@@ -243,6 +300,20 @@ SELECT
     END
   ) AS industry,
 
+  -- uk_region: 3-tier cascade against ONS reference data (t04_postcodes +
+  -- t04_organisations). Non-English ONSPD rows label region_name as
+  -- "(pseudo) Scotland" etc — strip the prefix by falling back to
+  -- country_name so output is clean (London / North West / Scotland / etc).
+  --   Tier 1: vacancy's postcode → t04_postcodes.region_name
+  --   Tier 2: vacancy's city → t04_postcodes.town_name then city_name
+  --   Tier 3: vacancy's organization_id → t04_organisations.postcode → t04_postcodes
+  COALESCE(
+    IF(t1_postcode.region_name LIKE '(pseudo) %', t1_postcode.country_name, t1_postcode.region_name),
+    IF(t2_town.region_name     LIKE '(pseudo) %', t2_town.country_name,     t2_town.region_name),
+    IF(t2_city.region_name     LIKE '(pseudo) %', t2_city.country_name,     t2_city.region_name),
+    IF(t3_hq.region_name       LIKE '(pseudo) %', t3_hq.country_name,       t3_hq.region_name)
+  ) AS uk_region,
+
   -- occupation: narrow classification, source feed only (no Appcast equivalent)
   smart_case(source_occupation) AS occupation,
 
@@ -333,6 +404,20 @@ LEFT JOIN (
   GROUP BY name_key
 ) AS orgs_by_name
   ON LOWER(TRIM(COALESCE(appcast_company, source_org_name))) = orgs_by_name.name_key
+-- Region tier 1: postcode match. Direct join — t04_postcodes is keyed on
+-- postcode in the standard 'M1 1AA' form. Both sides UPPER/TRIM-normalised.
+LEFT JOIN `site-monitoring-421401.JPD.t04_postcodes` AS t1_postcode
+  ON UPPER(TRIM(appcast_locations[SAFE_OFFSET(0)].postcode)) = t1_postcode.postcode
+-- Region tier 2a: BUASD (town) name match — more specific, tries first.
+LEFT JOIN town_to_region AS t2_town
+  ON LOWER(TRIM(appcast_locations[SAFE_OFFSET(0)].city)) = t2_town.name_key
+-- Region tier 2b: BUA (broader agglomeration) name match — fallback if town misses.
+LEFT JOIN city_to_region AS t2_city
+  ON LOWER(TRIM(appcast_locations[SAFE_OFFSET(0)].city)) = t2_city.name_key
+-- Region tier 3: HQ postcode chain. Final fallback when the vacancy itself
+-- has no usable location data.
+LEFT JOIN hq_to_region AS t3_hq
+  ON COALESCE(source_org_id, appcast_org_id) = t3_hq.organization_id
 
 UNION ALL
 
@@ -371,6 +456,12 @@ SELECT
       ELSE ss.organization_type
     END
   )                                                     AS industry,
+
+  -- uk_region: self-service rows have no structured postcode/city, only a flat
+  -- string in formatted_address — so Tiers 1 and 2 can't fire here. Only
+  -- Tier 3 (HQ postcode → region) applies.
+  IF(t3_ss_hq.region_name LIKE '(pseudo) %', t3_ss_hq.country_name, t3_ss_hq.region_name)
+                                                        AS uk_region,
 
   smart_case(ss.occupation)                             AS occupation,
 
@@ -432,6 +523,9 @@ LEFT JOIN (
   GROUP BY name_key
 ) AS orgs_ss_by_name
   ON LOWER(TRIM(ss.organization_name)) = orgs_ss_by_name.name_key
+-- Region tier 3: HQ postcode chain for self-service rows.
+LEFT JOIN hq_to_region AS t3_ss_hq
+  ON ss.organization_id = t3_ss_hq.organization_id
 -- Filter out entity_ids already in Appcast (the ~20 Appcast-only overlaps).
 -- This keeps the existing Appcast-only segment unchanged for those rows.
 LEFT JOIN (
