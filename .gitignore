@@ -57,6 +57,11 @@ historic_backfill.csv
 # scripts/00_load_organisations.py. Contains org names + addresses (PII-adjacent).
 organizations-export.csv
 
+# Self-service vacancies export — one-off source for t01_feed_selfservice via
+# scripts/00_load_selfservice.py. Contains job titles + user-created vacancy
+# details (PII-adjacent).
+manually_created_vacancies.csv
+
 # Logs
 logs-*.txt
 

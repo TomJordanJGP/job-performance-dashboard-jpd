@@ -333,6 +333,114 @@ LEFT JOIN (
   GROUP BY name_key
 ) AS orgs_by_name
   ON LOWER(TRIM(COALESCE(appcast_company, source_org_name))) = orgs_by_name.name_key
+
+UNION ALL
+
+-- ---------------------------------------------------------------------------
+-- 7. Self-service vacancies (4th t02 segment).  These are user-created jobs
+--    that never enter the live feeds or Appcast XML — entity_id-keyed, no
+--    external_id. Loaded one-off from manually_created_vacancies.csv into
+--    t01_feed_selfservice.  Filtered to exclude entity_ids already present
+--    in Appcast (the ~20 site-created Appcast-only rows) to avoid duplicate
+--    t02 rows for the same vacancy.
+-- ---------------------------------------------------------------------------
+SELECT
+  CAST(NULL AS STRING)                                  AS external_id,
+  ss.entity_id,
+  'Self-service'                                        AS source_feed,
+
+  ss.title,
+  IF(ss.title IS NOT NULL, 'Self-service', NULL)        AS title_source,
+
+  ss.organization_name,
+  IF(ss.organization_name IS NOT NULL, 'Self-service', NULL) AS organization_name_source,
+
+  ss.organization_id,
+  IF(ss.organization_id IS NOT NULL, 'Self-service', NULL)   AS organization_id_source,
+
+  -- industry: same 3-tier lookup as main rows. CSV's "Employer type (Industry)"
+  -- is carried as ss.organization_type and is 92% populated with the canonical
+  -- 9 industries — it almost always wins via the tier-3 leg even if tiers 1+2
+  -- fail.
+  COALESCE(
+    orgs_ss_by_id.industry,
+    orgs_ss_by_name.industry,
+    CASE
+      WHEN ss.organization_type IS NULL THEN NULL
+      WHEN LOWER(ss.organization_type) IN ('parent', 'child', 'standard') THEN NULL
+      ELSE ss.organization_type
+    END
+  )                                                     AS industry,
+
+  smart_case(ss.occupation)                             AS occupation,
+
+  CAST(NULL AS STRING)                                  AS category,
+  CAST(NULL AS STRING)                                  AS category_source,
+
+  smart_case_compound(ss.working_pattern)               AS employment_type,
+  IF(ss.working_pattern IS NOT NULL, 'Self-service', NULL) AS employment_type_source,
+
+  smart_case(ss.workflow_state)                         AS workflow_state,
+  'Self-service'                                        AS workflow_state_source,
+
+  ss.start_date,
+  IF(ss.start_date IS NOT NULL, 'Self-service', NULL)   AS start_date_source,
+
+  ss.close_date                                         AS end_date,
+  IF(ss.close_date IS NOT NULL, 'Self-service', NULL)   AS end_date_source,
+
+  ss.salary_min                                         AS min_salary,
+  ss.salary_max                                         AS max_salary,
+  ss.salary_exact                                       AS salary_exact,
+  ss.salary_free_text                                   AS salary_free_text,
+  smart_case(ss.salary_type)                            AS salary_unit,
+  ss.salary_currency                                    AS currency_code,
+
+  ss.jgp_external_vacancy_id,
+
+  -- Self-service vacancies don't appear in feed polls, so is_live is always
+  -- FALSE here. (If one ever gets published, it'll show up via a source feed
+  -- AND get the live flag through the main segments.)
+  FALSE                                                 AS is_live,
+
+  -- locations: CSV is a flat string like "London, UK". Wrap it in a single
+  -- STRUCT in the formatted_address slot so the column type matches the
+  -- main segments. Phase 6 region resolution will parse this centrally.
+  IF(
+    ss.locations IS NULL OR LENGTH(TRIM(ss.locations)) = 0,
+    NULL,
+    [STRUCT(
+      CAST(NULL AS STRING) AS country,
+      CAST(NULL AS STRING) AS region,
+      CAST(NULL AS STRING) AS postcode,
+      CAST(NULL AS STRING) AS city,
+      CAST(NULL AS STRING) AS street,
+      ss.locations         AS formatted_address
+    )]
+  )                                                     AS locations
+
+FROM `site-monitoring-421401.JPD.t01_feed_selfservice` AS ss
+-- Same 3-tier industry lookup the main segments use
+LEFT JOIN `site-monitoring-421401.JPD.t04_organisations` AS orgs_ss_by_id
+  ON ss.organization_id = orgs_ss_by_id.organization_id
+LEFT JOIN (
+  SELECT
+    LOWER(TRIM(organisation_name)) AS name_key,
+    ANY_VALUE(industry) AS industry
+  FROM `site-monitoring-421401.JPD.t04_organisations`
+  WHERE organisation_name IS NOT NULL
+  GROUP BY name_key
+) AS orgs_ss_by_name
+  ON LOWER(TRIM(ss.organization_name)) = orgs_ss_by_name.name_key
+-- Filter out entity_ids already in Appcast (the ~20 Appcast-only overlaps).
+-- This keeps the existing Appcast-only segment unchanged for those rows.
+LEFT JOIN (
+  SELECT DISTINCT entity_id
+  FROM `site-monitoring-421401.JPD.t01_feed_appcast`
+  WHERE entity_id IS NOT NULL
+) AS already_in_appcast
+  ON ss.entity_id = already_in_appcast.entity_id
+WHERE already_in_appcast.entity_id IS NULL
 ;
 
 -- ---------------------------------------------------------------------------
