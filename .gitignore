@@ -62,6 +62,18 @@ organizations-export.csv
 # details (PII-adjacent).
 manually_created_vacancies.csv
 
+# ONS Postcode Directory (May 2024) — 1.1 GB raw + lookups. Powers
+# scripts/00_load_postcodes.py which produces JPD.t04_postcodes (postcode →
+# UK region). Re-download from ONS if a newer vintage is needed.
+Postcodes_ONSPD_MAY_2024/
+Postcodes_ONSPD_MAY_2024.zip
+
+# Stray ONS auxiliary lookups parked locally for the region-cascade work
+Local_Authority_District_to_Region_*.csv
+
+# BigQuery query exports (UI-downloaded CSVs)
+bquxjob_*.csv
+
 # Logs
 logs-*.txt
 
