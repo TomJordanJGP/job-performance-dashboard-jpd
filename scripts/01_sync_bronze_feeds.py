@@ -268,6 +268,7 @@ def parse_ats(jobs):
             'salary_range_from': get_text(j, 'salary_range_from'),
             'salary_range_to': get_text(j, 'salary_range_to'),
             'reference': get_text(j, 'reference'), 'old_vacancy_id': get_text(j, 'old_vacancy_id'),
+            'jgp_external_vacancy_id': get_text(j, 'old_vacancy_id'),  # JGP-side ID — same value as old_vacancy_id, exposed under its canonical name for downstream joins
             'old_account_id': get_text(j, 'old_account_id'), 'frontends': get_text(j, 'frontends'),
             'internal_external': get_text(j, 'internal_external'),
             'application_method': get_text(j, 'application_method'), 'crb_check': get_text(j, 'crb_check'),
@@ -321,7 +322,8 @@ def _content_schema():
             S('category'), S('contract_type'), S('workplace'), S('working_pattern'), S('working_hours'),
             S('working_hours_per'), S('working_hours_free_text'), S('salary_free_text'),
             S('salary_range_from'), S('salary_range_to'),
-        ] + salary + [S('reference'), S('old_vacancy_id'), S('old_account_id'), S('frontends'),
+        ] + salary + [S('reference'), S('old_vacancy_id'), S('jgp_external_vacancy_id'),
+                      S('old_account_id'), S('frontends'),
                       S('internal_external'), S('application_method'), S('crb_check'),
                       S('created', TS), S('updated', TS), S('start_date', TS), S('close_date', TS), loc],
     }
