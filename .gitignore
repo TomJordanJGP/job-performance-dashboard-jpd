@@ -47,6 +47,12 @@ unmatched_locations.csv
 location_lookup.csv
 location_lookup_with_regions.csv
 
+# Jobiqo historic vacancy export — one-off backfill source (~300 MB total)
+historic_ats.csv
+historic_scrape.csv
+historic_civil_service.csv
+historic_backfill.csv
+
 # Logs
 logs-*.txt
 

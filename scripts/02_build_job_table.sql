@@ -56,7 +56,8 @@ source_union AS (
     occupation, category, working_pattern,
     salary_min, salary_max, salary_exact,
     salary_free_text, salary_type, salary_currency,
-    start_date, close_date, last_seen
+    start_date, close_date, last_seen,
+    jgp_external_vacancy_id
   FROM `site-monitoring-421401.JPD.t01_feed_ats`
   UNION ALL
   SELECT
@@ -65,7 +66,8 @@ source_union AS (
     occupation, category, working_pattern,
     salary_min, salary_max, salary_exact,
     salary_free_text, salary_type, salary_currency,
-    start_date, close_date, last_seen
+    start_date, close_date, last_seen,
+    jgp_external_vacancy_id
   FROM `site-monitoring-421401.JPD.t01_feed_scrape`
   UNION ALL
   SELECT
@@ -76,7 +78,8 @@ source_union AS (
     occupation, category, working_pattern,
     salary_min, salary_max, salary_exact,
     salary_free_text, salary_type, salary_currency,
-    start_date, close_date, last_seen
+    start_date, close_date, last_seen,
+    jgp_external_vacancy_id
   FROM `site-monitoring-421401.JPD.t01_feed_civil_service`
   UNION ALL
   SELECT
@@ -85,7 +88,8 @@ source_union AS (
     occupation, category, working_pattern,
     salary_min, salary_max, salary_exact,
     salary_free_text, salary_type, salary_currency,
-    start_date, close_date, last_seen
+    start_date, close_date, last_seen,
+    jgp_external_vacancy_id
   FROM `site-monitoring-421401.JPD.t01_feed_backfill`
 ),
 
@@ -122,20 +126,18 @@ appcast AS (
   SELECT
     external_id, entity_id, title, company, organization_id,
     occupation, employment_type, workflow_state,
-    date_posted, date_end, locations, last_seen
+    date_posted, date_end, locations, last_seen,
+    jgp_external_vacancy_id
   FROM `site-monitoring-421401.JPD.t01_feed_appcast`
 ),
 
 -- ---------------------------------------------------------------------------
--- 4. Latest poll timestamp per feed. Used for is_live computation.
+-- 4. Live-window threshold. A row counts as "live" if last_seen is within
+--    the last 24 hours — robust to multi-cadence / ad-hoc polls that an
+--    exact MAX(last_seen) comparison would mis-classify.
 -- ---------------------------------------------------------------------------
-max_seen AS (
-  SELECT
-    (SELECT MAX(last_seen) FROM `site-monitoring-421401.JPD.t01_feed_appcast`)       AS appcast_max,
-    (SELECT MAX(last_seen) FROM `site-monitoring-421401.JPD.t01_feed_ats`)           AS ats_max,
-    (SELECT MAX(last_seen) FROM `site-monitoring-421401.JPD.t01_feed_scrape`)        AS scrape_max,
-    (SELECT MAX(last_seen) FROM `site-monitoring-421401.JPD.t01_feed_civil_service`) AS cs_max,
-    (SELECT MAX(last_seen) FROM `site-monitoring-421401.JPD.t01_feed_backfill`)      AS backfill_max
+live_window AS (
+  SELECT TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 24 HOUR) AS threshold
 ),
 
 -- ---------------------------------------------------------------------------
@@ -158,6 +160,7 @@ joined AS (
     a.date_end               AS appcast_date_end,
     a.locations              AS appcast_locations,
     a.last_seen              AS appcast_last_seen,
+    a.jgp_external_vacancy_id AS appcast_jgp_id,
     -- Source fields
     s.title                  AS source_title,
     s.organization_id        AS source_org_id,
@@ -169,15 +172,16 @@ joined AS (
     s.salary_free_text, s.salary_type, s.salary_currency,
     s.start_date             AS source_start_date,
     s.close_date             AS source_close_date,
-    s.last_seen              AS source_last_seen
+    s.last_seen              AS source_last_seen,
+    s.jgp_external_vacancy_id AS source_jgp_id
   FROM appcast a
   FULL OUTER JOIN source_rows s USING (external_id)
 ),
 
 joined_with_max AS (
-  SELECT j.*, m.*
+  SELECT j.*, w.threshold AS live_threshold
   FROM joined j
-  CROSS JOIN max_seen m
+  CROSS JOIN live_window w
 )
 
 -- ---------------------------------------------------------------------------
@@ -264,21 +268,19 @@ SELECT
   smart_case(salary_type) AS salary_unit,
   salary_currency AS currency_code,
 
-  -- is_live: row's last_seen matches the most recent poll of any feed it
-  -- appears in. COALESCE to FALSE so a NULL side (matched-row's missing feed)
-  -- can't poison the OR.
+  -- jgp_external_vacancy_id: JGP-side identifier for joining future data.
+  -- Source feed wins (for ATS this is the live old_vacancy_id or historic
+  -- jgp value); Appcast as fallback for site-created rows (almost always NULL).
+  COALESCE(source_jgp_id, appcast_jgp_id) AS jgp_external_vacancy_id,
+
+  -- is_live: TRUE if the row appears in either feed within the last 24 hours
+  -- of CURRENT_TIMESTAMP(). Robust to multi-cadence/ad-hoc polls that an
+  -- exact MAX(last_seen) comparison would mis-classify when a single late
+  -- poll pulls MAX away from the main poll cluster.
   (
-    COALESCE(
-      source_last_seen = CASE source_feed
-        WHEN 'ATS'           THEN ats_max
-        WHEN 'Scrape'        THEN scrape_max
-        WHEN 'Civil Service' THEN cs_max
-        WHEN 'Backfill'      THEN backfill_max
-      END,
-      FALSE
-    )
+    COALESCE(source_last_seen  >= live_threshold, FALSE)
     OR
-    COALESCE(appcast_last_seen = appcast_max, FALSE)
+    COALESCE(appcast_last_seen >= live_threshold, FALSE)
   ) AS is_live,
 
   -- locations: Appcast only. Source-only rows leave this NULL — once Jobiqo
