@@ -210,24 +210,32 @@ SELECT
     ELSE NULL
   END AS organization_name_source,
 
-  -- organization_id: Appcast ▸ source (CS jobiqo_org_id already aliased to organization_id)
-  COALESCE(appcast_org_id, source_org_id) AS organization_id,
+  -- organization_id: source ▸ Appcast.  Source feeds are more reliable; Appcast
+  -- produces some inconsistent company IDs (different IDs for the same logical
+  -- org), so the source feed's org_id wins where present. Appcast.organization_id
+  -- only fills in for site-created Appcast-only rows.
+  COALESCE(source_org_id, appcast_org_id) AS organization_id,
   CASE
-    WHEN appcast_org_id IS NOT NULL THEN 'Appcast'
     WHEN source_org_id  IS NOT NULL THEN source_feed
+    WHEN appcast_org_id IS NOT NULL THEN 'Appcast'
     ELSE NULL
   END AS organization_id_source,
 
-  -- industry: master = t04_organisations.industry (looked up by final organization_id);
-  -- fallback = feed-supplied organization_type with hierarchy junk stripped.
-  -- t04_organisations is authoritative (Jobiqo's profile-level industry, 9 distinct
-  -- values, ~85% populated). The org_type fallback only kicks in for orgs not in
-  -- the lookup (~221 t02 orgs as of load). Civil Service + Appcast feed rows
-  -- naturally inherit industry from the lookup when their org_id matches; no
-  -- hard-coding. No _source column — provenance is implied by which leg of the
-  -- COALESCE fires (queryable via `orgs.industry IS NOT NULL`).
+  -- industry: 3-tier lookup against t04_organisations.
+  --   1) ID match  — orgs_by_id.industry  (final organization_id → t04 row)
+  --   2) Name match — orgs_by_name.industry (LOWER(TRIM(org_name)) → t04 row)
+  --      Recovers orgs whose org_id is in a different namespace than t04 uses
+  --      (e.g. Civil Service feed's gov.uk-side IDs vs Jobiqo's profile IDs).
+  --   3) org_type fallback — strip Parent/Child/Standard from feed XML.
+  --      Currently dormant: every org with a non-junk org_type is already in
+  --      the lookup; kept as a safety net for future orgs.
+  -- Name-match has 9 known disagreement cases in the lookup (e.g. "National
+  -- Crime Agency" with two rows, one Local Government, one Civil Service).
+  -- Risk is low because those orgs match by ID first; name only fires when
+  -- ID misses, and arbitrary pick is acceptable.
   COALESCE(
-    orgs.industry,
+    orgs_by_id.industry,
+    orgs_by_name.industry,
     CASE
       WHEN source_org_type IS NULL THEN NULL
       WHEN LOWER(source_org_type) IN ('parent', 'child', 'standard') THEN NULL
@@ -307,8 +315,24 @@ SELECT
   appcast_locations AS locations
 
 FROM joined_with_max
-LEFT JOIN `site-monitoring-421401.JPD.t04_organisations` AS orgs
-  ON COALESCE(appcast_org_id, source_org_id) = orgs.organization_id
+-- Industry lookup tier 1: ID match. Uses the final (source ▸ Appcast) org_id
+-- — matches the COALESCE in the SELECT above.
+LEFT JOIN `site-monitoring-421401.JPD.t04_organisations` AS orgs_by_id
+  ON COALESCE(source_org_id, appcast_org_id) = orgs_by_id.organization_id
+-- Industry lookup tier 2: case-insensitive name match. Only takes effect when
+-- ID match misses, via the COALESCE in the SELECT. Pre-aggregates the lookup
+-- (ANY_VALUE) so duplicate-name rows in the source don't multiply t02 rows;
+-- the 9 known disagreement cases (e.g. National Crime Agency) resolve to one
+-- arbitrary industry — low risk because those orgs match on ID first.
+LEFT JOIN (
+  SELECT
+    LOWER(TRIM(organisation_name)) AS name_key,
+    ANY_VALUE(industry) AS industry
+  FROM `site-monitoring-421401.JPD.t04_organisations`
+  WHERE organisation_name IS NOT NULL
+  GROUP BY name_key
+) AS orgs_by_name
+  ON LOWER(TRIM(COALESCE(appcast_company, source_org_name))) = orgs_by_name.name_key
 ;
 
 -- ---------------------------------------------------------------------------

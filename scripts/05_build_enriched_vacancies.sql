@@ -62,7 +62,19 @@ SELECT
 
   -- t02-only fields (NULL for orphan events)
   j.source_feed,
-  j.industry,
+
+  -- industry: 3-tier recovery so orphan events (no t02 row) still get a
+  -- value where possible.
+  --   1) j.industry — fully populated from t02 for matched events (which
+  --      already does its own ID→name→org_type cascade against t04_organisations)
+  --   2) orgs_event_id.industry — orphan events: lookup by GA4 organization_id
+  --   3) orgs_event_name.industry — orphan events: lookup by GA4 organization_name
+  COALESCE(
+    j.industry,
+    orgs_event_id.industry,
+    orgs_event_name.industry
+  )                                                                AS industry,
+
   j.occupation,
   j.locations,
   j.employment_type,
@@ -94,6 +106,21 @@ SELECT
 FROM `site-monitoring-421401.JPD.t04_vacancy_events` AS e
 LEFT JOIN `site-monitoring-421401.JPD.t02_job_table` AS j
   ON CAST(e.entity_id AS STRING) = j.entity_id
+-- Industry recovery for orphan events (rows where j.entity_id IS NULL).
+-- Tier 2: match GA4 event's organization_id to t04_organisations.
+LEFT JOIN `site-monitoring-421401.JPD.t04_organisations` AS orgs_event_id
+  ON CAST(e.organization_id AS STRING) = orgs_event_id.organization_id
+-- Tier 3: case-insensitive name match. Same pre-aggregation as t02 so
+-- duplicate-name rows in the source don't multiply event rows.
+LEFT JOIN (
+  SELECT
+    LOWER(TRIM(organisation_name)) AS name_key,
+    ANY_VALUE(industry) AS industry
+  FROM `site-monitoring-421401.JPD.t04_organisations`
+  WHERE organisation_name IS NOT NULL
+  GROUP BY name_key
+) AS orgs_event_name
+  ON LOWER(TRIM(e.organization_name)) = orgs_event_name.name_key
 
 UNION ALL
 
