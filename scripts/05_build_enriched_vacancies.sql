@@ -62,6 +62,7 @@ SELECT
 
   -- t02-only fields (NULL for orphan events)
   j.source_feed,
+  j.industry,
   j.occupation,
   j.locations,
   j.employment_type,
@@ -120,6 +121,7 @@ SELECT
   j.category,
 
   j.source_feed,
+  j.industry,
   j.occupation,
   j.locations,
   j.employment_type,

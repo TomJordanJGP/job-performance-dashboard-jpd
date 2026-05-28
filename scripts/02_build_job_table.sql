@@ -52,7 +52,7 @@ WITH
 source_union AS (
   SELECT
     'ATS' AS source_feed,
-    external_id, title, organization_id, organization_name,
+    external_id, title, organization_id, organization_name, organization_type,
     occupation, category, working_pattern,
     salary_min, salary_max, salary_exact,
     salary_free_text, salary_type, salary_currency,
@@ -62,7 +62,7 @@ source_union AS (
   UNION ALL
   SELECT
     'Scrape',
-    external_id, title, organization_id, organization_name,
+    external_id, title, organization_id, organization_name, organization_type,
     occupation, category, working_pattern,
     salary_min, salary_max, salary_exact,
     salary_free_text, salary_type, salary_currency,
@@ -75,6 +75,7 @@ source_union AS (
     external_id, title,
     jobiqo_org_id AS organization_id,
     CAST(NULL AS STRING) AS organization_name,
+    CAST(NULL AS STRING) AS organization_type,  -- CS feed has no org_type column
     occupation, category, working_pattern,
     salary_min, salary_max, salary_exact,
     salary_free_text, salary_type, salary_currency,
@@ -84,7 +85,7 @@ source_union AS (
   UNION ALL
   SELECT
     'Backfill',
-    external_id, title, organization_id, organization_name,
+    external_id, title, organization_id, organization_name, organization_type,
     occupation, category, working_pattern,
     salary_min, salary_max, salary_exact,
     salary_free_text, salary_type, salary_currency,
@@ -165,6 +166,7 @@ joined AS (
     s.title                  AS source_title,
     s.organization_id        AS source_org_id,
     s.organization_name      AS source_org_name,
+    s.organization_type      AS source_org_type,
     s.occupation             AS source_occupation,
     s.category               AS source_category,
     s.working_pattern        AS source_working_pattern,
@@ -215,6 +217,23 @@ SELECT
     WHEN source_org_id  IS NOT NULL THEN source_feed
     ELSE NULL
   END AS organization_id_source,
+
+  -- industry: master = t04_organisations.industry (looked up by final organization_id);
+  -- fallback = feed-supplied organization_type with hierarchy junk stripped.
+  -- t04_organisations is authoritative (Jobiqo's profile-level industry, 9 distinct
+  -- values, ~85% populated). The org_type fallback only kicks in for orgs not in
+  -- the lookup (~221 t02 orgs as of load). Civil Service + Appcast feed rows
+  -- naturally inherit industry from the lookup when their org_id matches; no
+  -- hard-coding. No _source column — provenance is implied by which leg of the
+  -- COALESCE fires (queryable via `orgs.industry IS NOT NULL`).
+  COALESCE(
+    orgs.industry,
+    CASE
+      WHEN source_org_type IS NULL THEN NULL
+      WHEN LOWER(source_org_type) IN ('parent', 'child', 'standard') THEN NULL
+      ELSE source_org_type
+    END
+  ) AS industry,
 
   -- occupation: narrow classification, source feed only (no Appcast equivalent)
   smart_case(source_occupation) AS occupation,
@@ -288,6 +307,8 @@ SELECT
   appcast_locations AS locations
 
 FROM joined_with_max
+LEFT JOIN `site-monitoring-421401.JPD.t04_organisations` AS orgs
+  ON COALESCE(appcast_org_id, source_org_id) = orgs.organization_id
 ;
 
 -- ---------------------------------------------------------------------------

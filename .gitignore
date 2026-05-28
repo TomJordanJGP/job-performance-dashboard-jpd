@@ -53,6 +53,10 @@ historic_scrape.csv
 historic_civil_service.csv
 historic_backfill.csv
 
+# Organisations reference export — drives the `industry` field via
+# scripts/00_load_organisations.py. Contains org names + addresses (PII-adjacent).
+organizations-export.csv
+
 # Logs
 logs-*.txt
 
