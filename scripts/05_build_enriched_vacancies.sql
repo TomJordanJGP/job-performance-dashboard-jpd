@@ -25,8 +25,10 @@
 --     fallback — NULL where t02 has no row (orphan events).
 --   * GA4-only fields (device, browser, campaign, page_*, etc.): NULL on
 --     metadata_only rows.
---   * t02's _source provenance columns pass through unchanged. They describe
---     t02's internal field-source decisions, NOT the t02-vs-t04 hybrid at t05.
+--   * t02's _source provenance columns are NOT carried into t05 — they describe
+--     t02's internal source-of-truth decisions, which would be confusing
+--     alongside the separate t02-vs-t04 hybrid logic above. Query t02 directly
+--     if provenance is needed.
 --
 -- Partition: event_date_dt DATE (matches t04 partition strategy).
 -- Cluster:   entity_id, organization_id.
@@ -74,16 +76,6 @@ SELECT
   j.currency_code,
   j.jgp_external_vacancy_id,
   j.is_live,
-
-  -- t02 provenance (pass-through from Phase 3 source-of-truth rules)
-  j.title_source,
-  j.organization_name_source,
-  j.organization_id_source,
-  j.category_source,
-  j.employment_type_source,
-  j.workflow_state_source,
-  j.start_date_source,
-  j.end_date_source,
 
   -- GA4-only context
   e.regions       AS ga4_location,
@@ -142,15 +134,6 @@ SELECT
   j.currency_code,
   j.jgp_external_vacancy_id,
   j.is_live,
-
-  j.title_source,
-  j.organization_name_source,
-  j.organization_id_source,
-  j.category_source,
-  j.employment_type_source,
-  j.workflow_state_source,
-  j.start_date_source,
-  j.end_date_source,
 
   CAST(NULL AS STRING)        AS ga4_location,
   CAST(NULL AS STRING)        AS page_referrer,
