@@ -16,7 +16,8 @@
 --     resolved to a UK region (postcode -> town -> city cascade, same as t02),
 --     so a vacancy spanning N regions yields N region rows and uk_regions is a
 --     pipe-joined list.
---   * GSC: ported verbatim from prod (jobsgopublic.searchconsole_* exports).
+--   * GSC: read from the pre-aggregated t04_gsc_daily (incrementally synced —
+--     see 04_create_and_backfill_gsc.sql / 04_sync_gsc_daily.sql).
 --   * contract_type: NULL for now (not in t05; no view consumes it yet).
 --   * importer_name: joined from t04_importers on the importer_ID t05 carries.
 
@@ -201,7 +202,7 @@ LEFT JOIN _vacancy_locations_resolved rl
 -- ===========================================================================
 -- T3: t06_summary_daily_totals — one row per day.
 -- GA4 clicks/applies (SUM Events) + JGP/LG split, GSC site + rich-result
--- metrics (ported verbatim from prod's Search Console exports), and live
+-- metrics (from the pre-aggregated t04_gsc_daily), and live
 -- vacancy counts from the vacancy summary's start/end dates.
 -- ===========================================================================
 CREATE OR REPLACE TABLE `site-monitoring-421401.JPD.t06_summary_daily_totals`
@@ -221,63 +222,21 @@ daily_events AS (
   WHERE event_name IN ('job_visit', 'job_apply_start') AND event_date_dt IS NOT NULL
   GROUP BY event_date_dt
 ),
--- GSC site-level metrics per day (impressions, clicks, position — total + GB).
+-- GSC site-level metrics per day — read from the pre-aggregated, incrementally
+-- maintained t04_gsc_daily (04_create_and_backfill_gsc.sql + 04_sync_gsc_daily.sql)
+-- instead of re-scanning ~5 GB of raw GSC on every rebuild.
 gsc_site_daily AS (
-  SELECT
-    COALESCE(jgp.data_date, lg.data_date) AS event_date,
-    COALESCE(jgp.impressions, 0)   AS impressions_jgp,
-    COALESCE(lg.impressions, 0)    AS impressions_lg,
-    COALESCE(jgp.gb_impressions, 0) AS gb_impressions_jgp,
-    COALESCE(lg.gb_impressions, 0)  AS gb_impressions_lg,
-    COALESCE(jgp.clicks, 0)    AS gsc_clicks_jgp,
-    COALESCE(lg.clicks, 0)     AS gsc_clicks_lg,
-    COALESCE(jgp.gb_clicks, 0) AS gb_gsc_clicks_jgp,
-    COALESCE(lg.gb_clicks, 0)  AS gb_gsc_clicks_lg,
-    COALESCE(jgp.sum_pos, 0)   AS sum_position_jgp,
-    COALESCE(lg.sum_pos, 0)    AS sum_position_lg
-  FROM (
-    SELECT data_date,
-      SUM(impressions) AS impressions,
-      SUM(IF(country = 'gbr', impressions, 0)) AS gb_impressions,
-      SUM(clicks) AS clicks,
-      SUM(IF(country = 'gbr', clicks, 0)) AS gb_clicks,
-      SUM(sum_top_position) AS sum_pos
-    FROM `jobsgopublic.searchconsole_jobsgopublic.searchdata_site_impression`
-    GROUP BY data_date
-  ) jgp
-  FULL OUTER JOIN (
-    SELECT data_date,
-      SUM(impressions) AS impressions,
-      SUM(IF(country = 'gbr', impressions, 0)) AS gb_impressions,
-      SUM(clicks) AS clicks,
-      SUM(IF(country = 'gbr', clicks, 0)) AS gb_clicks,
-      SUM(sum_top_position) AS sum_pos
-    FROM `jobsgopublic.searchconsole_lgjobs.searchdata_site_impression`
-    GROUP BY data_date
-  ) lg ON jgp.data_date = lg.data_date
+  SELECT event_date,
+    impressions_jgp, impressions_lg, gb_impressions_jgp, gb_impressions_lg,
+    gsc_clicks_jgp, gsc_clicks_lg, gb_gsc_clicks_jgp, gb_gsc_clicks_lg,
+    sum_position_jgp, sum_position_lg
+  FROM `site-monitoring-421401.JPD.t04_gsc_daily`
 ),
--- GSC URL-level rich result counts per day (job listing + job detail).
+-- GSC URL-level rich-result counts — also from the pre-aggregated t04_gsc_daily.
 gsc_rich_daily AS (
-  SELECT
-    COALESCE(jgp.data_date, lg.data_date) AS event_date,
-    COALESCE(jgp.job_listing_rich, 0) AS job_listing_rich_jgp,
-    COALESCE(lg.job_listing_rich, 0)  AS job_listing_rich_lg,
-    COALESCE(jgp.job_detail_rich, 0)  AS job_detail_rich_jgp,
-    COALESCE(lg.job_detail_rich, 0)   AS job_detail_rich_lg
-  FROM (
-    SELECT data_date,
-      SUM(IF(is_job_listing, impressions, 0)) AS job_listing_rich,
-      SUM(IF(is_job_details, impressions, 0)) AS job_detail_rich
-    FROM `jobsgopublic.searchconsole_jobsgopublic.searchdata_url_impression`
-    GROUP BY data_date
-  ) jgp
-  FULL OUTER JOIN (
-    SELECT data_date,
-      SUM(IF(is_job_listing, impressions, 0)) AS job_listing_rich,
-      SUM(IF(is_job_details, impressions, 0)) AS job_detail_rich
-    FROM `jobsgopublic.searchconsole_lgjobs.searchdata_url_impression`
-    GROUP BY data_date
-  ) lg ON jgp.data_date = lg.data_date
+  SELECT event_date,
+    job_listing_rich_jgp, job_listing_rich_lg, job_detail_rich_jgp, job_detail_rich_lg
+  FROM `site-monitoring-421401.JPD.t04_gsc_daily`
 ),
 date_spine AS (
   SELECT d AS event_date
