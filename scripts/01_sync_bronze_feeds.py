@@ -48,33 +48,33 @@ project_dir = os.path.dirname(script_dir)
 BQ_PROJECT = "site-monitoring-421401"
 BQ_DATASET = "JPD"
 
-FEEDS = {
-    "Appcast": "https://redacted.invalid/appcast_feed.xml",
-    "Scrape": "https://storage.googleapis.com/scrpr-job-data-export/jgp_scrapes/jgp_scraping_feed.xml",
-    "Civil Service": "https://storage.googleapis.com/scrpr-job-data-export/jgp_scrapes/civil_service_jobs_uk.xml",
-    "ATS": "https://storage.googleapis.com/scrpr-job-data-export/jgp_scrapes/jgp_ats_feed.xml",
-    "Backfill": "https://storage.googleapis.com/scrpr-job-data-export/jgp_scrapes/jgp_backfill_feed_v1.xml",
-}
+REGISTRY_TABLE = f"{BQ_PROJECT}.{BQ_DATASET}.t00_feed_registry"
+RUNS_TABLE = f"{BQ_PROJECT}.{BQ_DATASET}.t00_feed_runs"
 
-TABLE_NAMES = {
-    "Appcast": "t01_feed_appcast", "Scrape": "t01_feed_scrape",
-    "Civil Service": "t01_feed_civil_service", "ATS": "t01_feed_ats", "Backfill": "t01_feed_backfill",
-}
+# Feeds are defined as rows in t00_feed_registry — the URL, target table, shape
+# and dedupe priority all live there, NOT in this file. Adding a matched feed is
+# a one-row INSERT into that table; no code change here. Parsers and schemas stay
+# in code as a library keyed by the feed's `shape` (see PARSER_BY_SHAPE and
+# _content_schema below) — the registry just says which shape each feed uses.
+# Only a genuinely new XML layout needs a new parser + schema entry.
 
-# MERGE config per feed: match condition, the key the poll is de-duped on, and the
-# stable key column that must NOT be overwritten by an UPDATE.
-MERGE_CFG = {
-    "Appcast": dict(match="T.entity_id = S.entity_id OR T.external_id = S.external_id",
-                    dedup_key="entity_id", stable="entity_id", cluster=["entity_id", "external_id"]),
-    "Scrape": dict(match="T.external_id = S.external_id",
-                   dedup_key="external_id", stable="external_id", cluster=["external_id"]),
-    "Civil Service": dict(match="T.external_id = S.external_id",
-                          dedup_key="external_id", stable="external_id", cluster=["external_id"]),
-    "ATS": dict(match="T.external_id = S.external_id",
-                dedup_key="external_id", stable="external_id", cluster=["external_id"]),
-    "Backfill": dict(match="T.external_id = S.external_id",
-                     dedup_key="external_id", stable="external_id", cluster=["external_id"]),
-}
+# Freshness preflight: a feed whose newest advertised posting date is older than
+# this many days is flagged 'stale' (a warning — never aborts the run).
+FRESHNESS_DAYS = 14
+
+
+def merge_cfg(feed):
+    """MERGE config derived from feed kind (mirrors the old per-feed MERGE_CFG
+    exactly). Appcast is the registry overlay — site-created jobs have only
+    entity_id, so it matches on entity_id OR external_id and protects entity_id
+    from being overwritten. Every other feed is keyed on external_id."""
+    if feed["feed_kind"] == "appcast":
+        return dict(match="T.entity_id = S.entity_id OR T.external_id = S.external_id",
+                    dedup_key="entity_id", stable="entity_id",
+                    cluster=["entity_id", "external_id"])
+    return dict(match="T.external_id = S.external_id",
+                dedup_key="external_id", stable="external_id",
+                cluster=["external_id"])
 
 
 # --------------------------------------------------------------------------- #
@@ -90,7 +90,7 @@ def get_client():
         sys.exit(1)
     creds = Credentials.from_service_account_file(
         sa_path, scopes=['https://www.googleapis.com/auth/bigquery'])
-    return bigquery.Client(credentials=creds, project=BQ_PROJECT)
+    return bigquery.Client(credentials=creds, project=BQ_PROJECT, location="EU")
 
 
 # --------------------------------------------------------------------------- #
@@ -282,8 +282,10 @@ def parse_ats(jobs):
     return out
 
 
-PARSERS = {"Appcast": parse_appcast, "Scrape": parse_scrape, "Civil Service": parse_civil_service,
-           "ATS": parse_ats, "Backfill": parse_scrape}
+# Parser library keyed by feed `shape` (from the registry). 'scrape' covers both
+# the Scrape and Backfill feeds — identical XML layout.
+PARSER_BY_SHAPE = {"appcast": parse_appcast, "scrape": parse_scrape,
+                   "civil_service": parse_civil_service, "ats": parse_ats}
 
 
 # --------------------------------------------------------------------------- #
@@ -305,18 +307,18 @@ def _content_schema():
     ] + salary + [S('reference'), S('old_account_id'), S('frontends'),
                   S('start_date', TS), S('close_date', TS), loc]
     return {
-        "Appcast": [
+        "appcast": [
             S('entity_id'), S('external_id'), S('title'), S('company'), S('organization_id'),
             S('occupation'), S('employment_type'), S('date_posted', TS), S('date_end', TS),
             S('remote_option'), S('workflow_state'), S('application_workflow'),
             S('application_information'), S('logo_url'), S('url'), loc],
-        "Scrape": scrape_like, "Backfill": scrape_like,
-        "Civil Service": [
+        "scrape": scrape_like,
+        "civil_service": [
             S('external_id'), S('entity_id'), S('jobiqo_org_id'), S('title'), S('url'), S('apply_url'),
             S('location'), S('occupation'), S('category'), S('contract_type'), S('workplace'),
             S('working_pattern'), S('salary_free_text'),
         ] + salary + [S('reference'), S('frontends'), S('start_date', TS), S('close_date', TS), loc],
-        "ATS": [
+        "ats": [
             S('external_id'), S('entity_id'), S('title'), S('url'), S('apply_url'), S('job_location'),
             S('organization_id'), S('organization_name'), S('organization_type'), S('occupation'),
             S('category'), S('contract_type'), S('workplace'), S('working_pattern'), S('working_hours'),
@@ -355,29 +357,29 @@ def fetch_feed(feed_name, url):
         return []
 
 
-def ensure_target(client, feed_name, content_schema):
+def ensure_target(client, feed, content_schema):
     from google.cloud import bigquery
-    table_id = f"{BQ_PROJECT}.{BQ_DATASET}.{TABLE_NAMES[feed_name]}"
+    table_id = f"{BQ_PROJECT}.{BQ_DATASET}.{feed['table_name']}"
     try:
         client.get_table(table_id)
     except Exception:
         table = bigquery.Table(table_id, schema=_target_schema(content_schema))
-        table.clustering_fields = MERGE_CFG[feed_name]['cluster']
+        table.clustering_fields = merge_cfg(feed)['cluster']
         client.create_table(table)
-        print(f"    created {TABLE_NAMES[feed_name]}")
+        print(f"    created {feed['table_name']}")
     return table_id
 
 
-def load_staging(client, feed_name, rows, content_schema):
+def load_staging(client, feed, rows, content_schema):
     from google.cloud import bigquery
-    staging_id = f"{BQ_PROJECT}.{BQ_DATASET}.{TABLE_NAMES[feed_name]}_staging"
+    staging_id = f"{BQ_PROJECT}.{BQ_DATASET}.{feed['table_name']}_staging"
     job_config = bigquery.LoadJobConfig(write_disposition='WRITE_TRUNCATE', schema=content_schema)
     client.load_table_from_json(rows, staging_id, job_config=job_config).result()
     return staging_id
 
 
-def run_merge(client, feed_name, target_id, staging_id, content_cols, run_ts):
-    cfg = MERGE_CFG[feed_name]
+def run_merge(client, feed, target_id, staging_id, content_cols, run_ts):
+    cfg = merge_cfg(feed)
     ts = f'TIMESTAMP("{run_ts}")'
     hash_struct = ', '.join(content_cols)
     set_cols = [c for c in content_cols if c != cfg['stable']]
@@ -410,58 +412,181 @@ def _pct(num, den):
     return f"{(num / den * 100):.1f}%" if den else "n/a"
 
 
+def load_registry(client):
+    """Active feeds from t00_feed_registry. The URL/table/shape/priority all live
+    here now, not in this file — so adding a matched feed is a one-row INSERT."""
+    q = f"""
+    SELECT feed_name, url, table_name, feed_kind, shape, org_id_column, priority
+    FROM `{REGISTRY_TABLE}`
+    WHERE active
+    ORDER BY feed_kind, priority
+    """
+    return [dict(r.items()) for r in client.query(q).result()]
+
+
+def feed_max_date(shape, rows):
+    """Newest advertised posting date (<= now) across a feed's parsed rows — the
+    freshness signal. Future-dated values are ignored (a scheduled start_date is
+    not evidence of a recent post; see lessons.md on future-date leaks)."""
+    field = 'date_posted' if shape == 'appcast' else 'start_date'
+    now = datetime.now(timezone.utc)
+    best = None
+    for r in rows:
+        v = r.get(field)
+        if not v:
+            continue
+        try:
+            d = dateparser.parse(v)
+        except Exception:
+            continue
+        if d is None:
+            continue
+        d = d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
+        if d <= now and (best is None or d > best):
+            best = d
+    return best
+
+
+def runs_schema():
+    from google.cloud import bigquery
+    S = lambda n, t='STRING': bigquery.SchemaField(n, t)
+    return [
+        S('run_ts', 'TIMESTAMP'), S('feed_name'), S('url'),
+        S('jobs_fetched', 'INT64'), S('rows_merged', 'INT64'),
+        S('max_feed_date', 'TIMESTAMP'), S('status'), S('message'),
+    ]
+
+
+def write_run_log(client, rows):
+    """Append one row per (feed, run) to t00_feed_runs (load job, not streaming —
+    no buffer lock, immediately queryable)."""
+    from google.cloud import bigquery
+    if not rows:
+        return
+    job_config = bigquery.LoadJobConfig(write_disposition='WRITE_APPEND', schema=runs_schema())
+    client.load_table_from_json(rows, RUNS_TABLE, job_config=job_config).result()
+
+
 def main():
-    ap = argparse.ArgumentParser(description='Bronze upsert ingest into JPD.t01_feed_*')
-    ap.add_argument('--dry-run', action='store_true', help='Fetch + parse + report only; no BigQuery')
+    ap = argparse.ArgumentParser(
+        description='Bronze upsert ingest into JPD.t01_feed_* (registry-driven)')
+    ap.add_argument('--dry-run', action='store_true',
+                    help='Fetch + parse + preflight + report only; no MERGE, no run-log write')
+    ap.add_argument('--strict', action='store_true',
+                    help='Abort before any MERGE if an active feed returned 0 jobs (likely dead URL)')
     args = ap.parse_args()
 
     start = datetime.now()
     run_ts = datetime.now(timezone.utc).isoformat()
-    print("Bronze Feed Upsert -> JPD")
+    print("Bronze Feed Upsert -> JPD (registry-driven)")
     print(f"Started: {start:%Y-%m-%d %H:%M:%S}")
 
     content_schemas = _content_schema()
-    client = None if args.dry_run else get_client()
+    client = get_client()                      # always — the feed list lives in BQ now
+    feeds = load_registry(client)
+    print(f"Loaded {len(feeds)} active feed(s) from t00_feed_registry")
+    if not feeds:
+        print("No active feeds — nothing to do.")
+        return
 
+    # Fetch + parse every active feed
     frames = {}
     print("\nFetching + parsing feeds...")
-    for feed_name, url in FEEDS.items():
-        frames[feed_name] = PARSERS[feed_name](fetch_feed(feed_name, url))
+    for feed in feeds:
+        parser = PARSER_BY_SHAPE.get(feed['shape'])
+        if parser is None:
+            print(f"  {feed['feed_name']}: no parser for shape '{feed['shape']}' — skipped")
+            frames[feed['feed_name']] = []
+            continue
+        frames[feed['feed_name']] = parser(fetch_feed(feed['feed_name'], feed['url']))
 
-    print(f"\n{'='*72}\nRow counts | entity_id linkage | location coverage\n{'='*72}")
-    appcast_ids = {r['external_id'] for r in frames.get('Appcast', []) if r.get('external_id')}
-    for feed_name, rows in frames.items():
+    # Preflight: status per feed + report
+    print(f"\n{'='*72}\nPreflight | rows | entity_id / Appcast linkage | freshness\n{'='*72}")
+    appcast_ids = set()
+    for f in feeds:
+        if f['feed_kind'] == 'appcast':
+            appcast_ids = {r['external_id'] for r in frames[f['feed_name']] if r.get('external_id')}
+            break
+    now = datetime.now(timezone.utc)
+    statuses = {}     # feed_name -> {status, message, max_date}
+    for feed in feeds:
+        name, rows = feed['feed_name'], frames[feed['feed_name']]
         n = len(rows)
-        total_locs = sum(len(r['locations']) for r in rows)
-        max_locs = max((len(r['locations']) for r in rows), default=0)
-        loc_str = f"locs: {total_locs:,} total, max {max_locs}/vac"
-        if feed_name == 'Appcast':
+        max_date = feed_max_date(feed['shape'], rows)
+        if n == 0:
+            status, msg = 'empty', 'feed returned 0 jobs (check URL?)'
+        elif max_date is None:
+            status, msg = 'ok', 'no usable posting date'
+        elif (now - max_date).days > FRESHNESS_DAYS:
+            status, msg = 'stale', f"newest post {(now - max_date).days}d old (> {FRESHNESS_DAYS}d)"
+        else:
+            status, msg = 'ok', ''
+        statuses[name] = {'status': status, 'message': msg, 'max_date': max_date}
+
+        locs = sum(len(r['locations']) for r in rows)
+        fresh = max_date.strftime('%Y-%m-%d') if max_date else 'n/a'
+        flag = '' if status == 'ok' else f"   <-- {status.upper()}: {msg}"
+        if feed['feed_kind'] == 'appcast':
             ent = sum(1 for r in rows if r.get('entity_id'))
-            print(f"  {feed_name:14s} {n:6,} rows | entity_id: {ent:,} ({_pct(ent, n)}) | {loc_str}")
-        elif n:
+            link = f"entity_id {_pct(ent, n)}"
+        else:
             matched = sum(1 for r in rows if r.get('external_id') in appcast_ids)
-            print(f"  {feed_name:14s} {n:6,} rows | in Appcast: {matched:,} ({_pct(matched, n)}) | {loc_str}")
+            link = f"in Appcast {_pct(matched, n)}"
+        print(f"  {name:14s} {n:6,} rows | {link:18s} | newest {fresh} | locs {locs:,}{flag}")
+
+    empty_feeds = [n for n, s in statuses.items() if s['status'] == 'empty']
+    if args.strict and empty_feeds:
+        print(f"\n[STRICT] Aborting — feed(s) returned 0 jobs: {', '.join(empty_feeds)}")
+        if not args.dry_run:
+            write_run_log(client, [{
+                'run_ts': run_ts, 'feed_name': f['feed_name'], 'url': f['url'],
+                'jobs_fetched': len(frames[f['feed_name']]), 'rows_merged': 0,
+                'max_feed_date': (statuses[f['feed_name']]['max_date'].isoformat()
+                                  if statuses[f['feed_name']]['max_date'] else None),
+                'status': statuses[f['feed_name']]['status'],
+                'message': statuses[f['feed_name']]['message'] or None,
+            } for f in feeds])
+            print("  logged the aborted run to t00_feed_runs")
+        sys.exit(1)
 
     if args.dry_run:
-        print(f"\n[DRY RUN] No writes. Parsed {sum(len(d) for d in frames.values()):,} rows total.")
+        total = sum(len(d) for d in frames.values())
+        print(f"\n[DRY RUN] No writes. Parsed {total:,} rows across {len(feeds)} feeds.")
+        if empty_feeds:
+            print(f"[DRY RUN] Would warn on empty feed(s): {', '.join(empty_feeds)}")
         print(f"Completed in {(datetime.now() - start).total_seconds():.0f}s")
         return
 
+    # MERGE + run-log
     print(f"\n{'='*72}\nUpserting (MERGE) into Bronze tables\n{'='*72}")
-    for feed_name, rows in frames.items():
+    run_rows = []
+    for feed in feeds:
+        name, rows = feed['feed_name'], frames[feed['feed_name']]
+        st = statuses[name]
+        status, msg = st['status'], st['message']
+        merged = 0
         if not rows:
-            print(f"  {feed_name}: 0 rows — skipped")
-            continue
-        try:
-            cs = content_schemas[feed_name]
-            content_cols = [f.name for f in cs]
-            target_id = ensure_target(client, feed_name, cs)
-            staging_id = load_staging(client, feed_name, rows, cs)
-            affected = run_merge(client, feed_name, target_id, staging_id, content_cols, run_ts)
-            print(f"  {feed_name:14s} MERGE OK ({affected:,} rows inserted/updated)")
-        except Exception as e:
-            print(f"  {feed_name:14s} FAILED — {type(e).__name__}: {e}")
+            print(f"  {name:14s} 0 rows — skipped")
+        else:
+            try:
+                cs = content_schemas[feed['shape']]
+                content_cols = [fld.name for fld in cs]
+                target_id = ensure_target(client, feed, cs)
+                staging_id = load_staging(client, feed, rows, cs)
+                merged = run_merge(client, feed, target_id, staging_id, content_cols, run_ts) or 0
+                print(f"  {name:14s} MERGE OK ({merged:,} rows inserted/updated)")
+            except Exception as e:
+                status, msg = 'error', f"{type(e).__name__}: {e}"
+                print(f"  {name:14s} FAILED — {msg}")
+        run_rows.append({
+            'run_ts': run_ts, 'feed_name': name, 'url': feed['url'],
+            'jobs_fetched': len(rows), 'rows_merged': int(merged),
+            'max_feed_date': st['max_date'].isoformat() if st['max_date'] else None,
+            'status': status, 'message': msg or None,
+        })
 
+    write_run_log(client, run_rows)
+    print(f"  logged {len(run_rows)} run rows to t00_feed_runs")
     print(f"\n{'='*72}\nCompleted in {(datetime.now() - start).total_seconds():.0f}s")
 
 
