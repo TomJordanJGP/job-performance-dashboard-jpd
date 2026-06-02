@@ -29,7 +29,6 @@ from theme.components import (
     summary_bar,
 )
 from data.processing import apply_media_categories
-from data.loader import load_client_hq_regions
 
 
 # Static explainers describing how each chart is calculated. Single source of
@@ -561,7 +560,7 @@ def generate_section_commentary_structured(section, data):
     elif section == 'salary':
         per_occ = data.get('per_occ') or []
         client_name = data.get('client_name', 'This client')
-        client_region = data.get('client_region')
+        client_regions = data.get('client_regions') or []
 
         if not per_occ:
             return {'intro': 'Insufficient salary data to generate commentary for this client.',
@@ -600,7 +599,7 @@ def generate_section_commentary_structured(section, data):
                        f"(£{worst[2]:,.0f} vs £{worst[3]:,.0f}) — a likely contributor to slower candidate flow in this category.")
 
         point_3 = ''
-        if client_region:
+        if client_regions:
             reg_above = reg_below = 0
             for p in per_occ:
                 c, r = p.get('client_mean'), p.get('regional_mean')
@@ -611,12 +610,14 @@ def generate_section_commentary_structured(section, data):
                 elif c < r:
                     reg_below += 1
             if reg_above + reg_below > 0:
-                point_3 = (f"Within {client_region}, {client_name} pays above the regional average for "
+                region_phrase = (client_regions[0] if len(client_regions) == 1
+                                 else f"its {len(client_regions)} regions")
+                point_3 = (f"Across {region_phrase}, {client_name} pays above the regional average for "
                            f"{reg_above} of these roles and below for {reg_below} — useful context when "
                            f"benchmarking against employers competing for the same local talent pool.")
         else:
-            point_3 = ("Regional benchmark unavailable for this client — common for central-government and "
-                       "multi-site bodies whose vacancies span the UK.")
+            point_3 = ("Regional benchmark unavailable — no UK region could be resolved from this "
+                       "client's vacancy locations.")
 
         return {'intro': _clean(intro), 'point_1': _clean(point_1), 'point_2': _clean(point_2), 'point_3': _clean(point_3)}
 
@@ -1501,7 +1502,7 @@ def render_client_report(df, media_df=None):
         # Persistent across the conditional branches so the commentary generator
         # downstream can pick them up (None when section is skipped).
         salary_per_occ = None
-        salary_client_region = None
+        salary_client_regions = None
 
         client_with_salary = client_df[client_df.get('has_salary_data', False) == True]
 
@@ -1522,23 +1523,23 @@ def render_client_report(df, media_df=None):
                     "≥5 priced roles per occupation to be meaningful."
                 )
             else:
-                # Look up client HQ region (None for multi-site / central-gov clients)
-                hq_map = load_client_hq_regions()
-                client_region = hq_map.get(selected_client.lower().strip())
-
-                # Pre-build the regional market subset once. Compare on
-                # lower-stripped strings so canonical/raw spelling differences
-                # between primary_uk_region and client_hq_addresses don't drop
-                # the line silently.
-                df_regional_market = None
-                if client_region and 'primary_uk_region' in df.columns:
-                    norm = client_region.strip().lower()
-                    df_regional_market = df[
-                        (df.get('has_salary_data', False) == True)
-                        & (df['primary_uk_region'].fillna('').str.strip().str.lower() == norm)
-                    ]
-                    if len(df_regional_market) == 0:
-                        df_regional_market = None  # No samples → drop regional line
+                # Per-vacancy region: the client's regions come from its OWN
+                # vacancies (primary_uk_region), not a per-org HQ lookup. Each
+                # priced role is benchmarked below against its own region's
+                # market mean, so multi-region employers (councils, trusts,
+                # central gov) reflect their real footprint instead of being
+                # suppressed.
+                if 'primary_uk_region' in client_with_salary.columns:
+                    client_regions = sorted({
+                        r.strip() for r in client_with_salary['primary_uk_region'].dropna()
+                        if isinstance(r, str) and r.strip()
+                    })
+                else:
+                    client_regions = []
+                client_regions_label = (
+                    ", ".join(client_regions) if 1 <= len(client_regions) <= 2
+                    else f"{len(client_regions)} regions" if client_regions else None
+                )
 
                 # Brand-kit reference lines: pink (you), bold green (national), deep blue (region)
                 client_color = JGP_COLORS['pink']        # #ffc4c4 — your mean
@@ -1554,13 +1555,25 @@ def render_client_report(df, media_df=None):
                     market_salaries = market_occ['annual_mid_salary'].dropna()
                     national_mean = market_salaries.mean() if len(market_salaries) else np.nan
 
-                    if df_regional_market is not None:
-                        reg_vals = df_regional_market[df_regional_market['occupation'] == occ]['annual_mid_salary'].dropna()
-                        regional_mean = reg_vals.mean() if len(reg_vals) >= 3 else np.nan
-                        regional_n = len(reg_vals)
-                    else:
-                        regional_mean = np.nan
-                        regional_n = 0
+                    # Vacancy-weighted: each client role benchmarked against its
+                    # OWN region's market mean for this occupation, then averaged
+                    # weighted by the client's role counts per region. Regions
+                    # with <3 market samples are skipped.
+                    regional_mean = np.nan
+                    regional_n = 0
+                    if client_regions and 'primary_uk_region' in df.columns:
+                        mk = market_occ[market_occ['annual_mid_salary'].notna()].copy()
+                        mk['_reg'] = mk['primary_uk_region'].fillna('').str.strip().str.lower()
+                        co = client_occ[client_occ['primary_uk_region'].notna()].copy()
+                        co['_reg'] = co['primary_uk_region'].str.strip().str.lower()
+                        wsum, wtot = 0.0, 0
+                        for reg_key, n_roles in co['_reg'].value_counts().items():
+                            reg_market = mk[mk['_reg'] == reg_key]['annual_mid_salary']
+                            if len(reg_market) >= 3:
+                                wsum += reg_market.mean() * n_roles
+                                wtot += n_roles
+                                regional_n += len(reg_market)
+                        regional_mean = (wsum / wtot) if wtot > 0 else np.nan
 
                     per_occ.append({
                         'occupation': occ,
@@ -1670,7 +1683,7 @@ def render_client_report(df, media_df=None):
                         go.Scatter(
                             x=[None], y=[None], mode='lines',
                             line=dict(color=regional_color, width=2),
-                            name=f"Regional mean ({client_region})",
+                            name=f"Regional mean ({client_regions_label})",
                         ),
                         row=1, col=1,
                     )
@@ -1700,23 +1713,23 @@ def render_client_report(df, media_df=None):
                     config={'displayModeBar': 'hover', 'displaylogo': False},
                 )
 
-                if not client_region:
+                if not client_regions:
                     st.caption(
-                        "_HQ region unavailable for this client — regional benchmark "
-                        "line omitted. (Common for central-government and multi-site "
-                        "bodies.)_"
+                        "_No UK region could be resolved from this client's vacancy "
+                        "locations — regional benchmark line omitted._"
                     )
                 elif not any_regional:
                     st.caption(
-                        f"_No comparable salary data found in {client_region} for "
-                        f"these occupations — regional benchmark line omitted._"
+                        "_Not enough comparable market salary data in this client's "
+                        "region(s) (need ≥3 priced market roles per region) — regional "
+                        "benchmark line omitted._"
                     )
 
                 report_figures['salary_by_occupation'] = fig_salary_occ
 
                 # Expose for downstream commentary generator
                 salary_per_occ = per_occ
-                salary_client_region = client_region
+                salary_client_regions = client_regions
 
     # ===================================================================
     # SECTION 08: CHANNEL PERFORMANCE (existing media performance)
@@ -1975,7 +1988,7 @@ def render_client_report(df, media_df=None):
         salary_struct = generate_section_commentary_structured('salary', {
             'per_occ': salary_per_occ,
             'client_name': selected_client,
-            'client_region': salary_client_region,
+            'client_regions': salary_client_regions,
         })
 
         # --- Build report_metrics dict (matches template tag names) ---

@@ -7,13 +7,16 @@ from google.oauth2.service_account import Credentials
 from google.cloud import bigquery
 from datetime import datetime, timedelta
 
-# BigQuery configuration
-BQ_PROJECT_ID = "site-monitoring-421401"
-BQ_DATASET_ID = "job_data_export"
-BQ_TABLE_ID = "dashboard_vacancy_summary"
-BQ_DAILY_TOTALS_TABLE_ID = "dashboard_daily_totals"
-BQ_REGION_SUMMARY_TABLE_ID = "dashboard_vacancy_region_summary"
-BQ_MEDIA_SUMMARY_TABLE_ID = "dashboard_media_summary"
+# BigQuery names live in data/config.py (single source of truth — points at the
+# JPD Gold tables). Imported here so the query code below is otherwise unchanged.
+from data.config import (
+    BQ_PROJECT_ID,
+    BQ_DATASET_ID,
+    BQ_TABLE_ID,
+    BQ_DAILY_TOTALS_TABLE_ID,
+    BQ_REGION_SUMMARY_TABLE_ID,
+    BQ_MEDIA_SUMMARY_TABLE_ID,
+)
 
 SCOPES = [
     'https://www.googleapis.com/auth/bigquery',
@@ -282,29 +285,4 @@ def load_importer_mapping():
         return {}
     except Exception as e:
         st.error(f"Error loading importer mapping: {e}")
-        return {}
-
-
-@st.cache_data(ttl=14400)
-def load_client_hq_regions():
-    """Return {organisation_name_lower: region} from client_hq_addresses.
-
-    Used by the Client Report's salary-benchmark section to determine which
-    UK region's market salaries to use for a regional reference line.
-    Names are lowercased + trimmed on the way in so lookups can be done
-    case-insensitively against the dashboard's organisation_name column.
-    """
-    try:
-        client = get_bigquery_client()
-        query = f"""
-        SELECT
-            LOWER(TRIM(organisation_name)) AS org_name_key,
-            ANY_VALUE(region) AS region
-        FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.client_hq_addresses`
-        WHERE organisation_name IS NOT NULL AND region IS NOT NULL
-        GROUP BY org_name_key
-        """
-        df = client.query(query).to_dataframe(create_bqstorage_client=False)
-        return dict(zip(df['org_name_key'], df['region']))
-    except Exception:
         return {}
