@@ -114,7 +114,8 @@ SELECT
   e.campaign,
   e.medium,
   e.source,
-  e.site
+  e.site,
+  e.importer_ID
 
 FROM `site-monitoring-421401.JPD.t04_vacancy_events` AS e
 LEFT JOIN `site-monitoring-421401.JPD.t02_job_table` AS j
@@ -210,7 +211,8 @@ SELECT
   CAST(NULL AS STRING)        AS campaign,
   CAST(NULL AS STRING)        AS medium,
   CAST(NULL AS STRING)        AS source,
-  CAST(NULL AS STRING)        AS site
+  CAST(NULL AS STRING)        AS site,
+  CAST(NULL AS INT64)         AS importer_ID
 
 FROM `site-monitoring-421401.JPD.t02_job_table` AS j
 LEFT JOIN (
