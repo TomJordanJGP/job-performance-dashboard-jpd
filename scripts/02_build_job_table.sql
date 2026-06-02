@@ -45,53 +45,15 @@ CREATE OR REPLACE TABLE `site-monitoring-421401.JPD.t02_job_table` AS
 WITH
 
 -- ---------------------------------------------------------------------------
--- 1. Stack the 4 source feeds. Each row carries its source_feed label.
---    Civil Service has no organization_name and uses jobiqo_org_id in place
---    of organization_id.
+-- 1. Stack the source feeds. Each row carries its source_feed label.
+--    GENERATED — the source_union body and the source-priority CASE below are
+--    templated from t00_feed_registry (feed_kind='source', ordered by priority)
+--    by scripts/build_job_table.py. Do NOT hand-edit the generated blocks; add
+--    a feed via a registry INSERT and rebuild. Civil Service maps jobiqo_org_id
+--    -> organization_id and has no organization_name/organization_type (NULL'd).
 -- ---------------------------------------------------------------------------
 source_union AS (
-  SELECT
-    'ATS' AS source_feed,
-    external_id, title, organization_id, organization_name, organization_type,
-    occupation, category, working_pattern,
-    salary_min, salary_max, salary_exact,
-    salary_free_text, salary_type, salary_currency,
-    start_date, close_date, last_seen,
-    jgp_external_vacancy_id
-  FROM `site-monitoring-421401.JPD.t01_feed_ats`
-  UNION ALL
-  SELECT
-    'Scrape',
-    external_id, title, organization_id, organization_name, organization_type,
-    occupation, category, working_pattern,
-    salary_min, salary_max, salary_exact,
-    salary_free_text, salary_type, salary_currency,
-    start_date, close_date, last_seen,
-    jgp_external_vacancy_id
-  FROM `site-monitoring-421401.JPD.t01_feed_scrape`
-  UNION ALL
-  SELECT
-    'Civil Service',
-    external_id, title,
-    jobiqo_org_id AS organization_id,
-    CAST(NULL AS STRING) AS organization_name,
-    CAST(NULL AS STRING) AS organization_type,  -- CS feed has no org_type column
-    occupation, category, working_pattern,
-    salary_min, salary_max, salary_exact,
-    salary_free_text, salary_type, salary_currency,
-    start_date, close_date, last_seen,
-    jgp_external_vacancy_id
-  FROM `site-monitoring-421401.JPD.t01_feed_civil_service`
-  UNION ALL
-  SELECT
-    'Backfill',
-    external_id, title, organization_id, organization_name, organization_type,
-    occupation, category, working_pattern,
-    salary_min, salary_max, salary_exact,
-    salary_free_text, salary_type, salary_currency,
-    start_date, close_date, last_seen,
-    jgp_external_vacancy_id
-  FROM `site-monitoring-421401.JPD.t01_feed_backfill`
+{{SOURCE_UNION}}
 ),
 
 -- ---------------------------------------------------------------------------
@@ -106,10 +68,7 @@ source_rows AS (
       ROW_NUMBER() OVER (
         PARTITION BY external_id
         ORDER BY CASE source_feed
-          WHEN 'ATS' THEN 1
-          WHEN 'Scrape' THEN 2
-          WHEN 'Civil Service' THEN 3
-          WHEN 'Backfill' THEN 4
+{{SOURCE_PRIORITY_CASE}}
         END
       ) AS rn
     FROM source_union
