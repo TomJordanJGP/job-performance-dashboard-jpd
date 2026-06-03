@@ -98,6 +98,7 @@ WITH agg AS (
     ANY_VALUE(category)          AS occupational_fields,
     ANY_VALUE(importer_ID)       AS importer_ID,
     ANY_VALUE(workflow_state)    AS workflow_state,
+    COALESCE(LOGICAL_OR(is_live), FALSE) AS is_live,
     ANY_VALUE(upgrades)          AS upgrades,
     ANY_VALUE(start_date)        AS start_date,
     ANY_VALUE(end_date)          AS end_date,
@@ -136,6 +137,13 @@ SELECT
   a.importer_ID,
   imp.importer_name,
   a.workflow_state,
+  a.is_live,
+  -- vacancy_status: real Published/Unpublished status. workflow_state is copied
+  -- verbatim from the Appcast feed (≈always 'published') and is never flipped when
+  -- a vacancy drops out, so it can't be trusted. is_live (in the feed within 24h)
+  -- is the true signal; the feed only carries published rows, so this is exactly
+  -- the Published/Unpublished pair the source system uses.
+  CASE WHEN a.is_live THEN 'Published' ELSE 'Unpublished' END AS vacancy_status,
   a.upgrades,
   a.start_date,
   a.end_date,

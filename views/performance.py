@@ -336,8 +336,13 @@ def render_performance(df, region_df=None):
         applies = int(_a) if pd.notna(_a) else 0
         ratio = round((applies / clicks * 100)) if clicks > 0 else 0
 
-        status = job.get('workflow_state', 'Unknown')
-        is_published = status == 'published'
+        # vacancy_status (Published/Unpublished, from is_live) replaces the frozen
+        # workflow_state; fall back to workflow_state if the column isn't present
+        # yet (deploy→refresh window).
+        _il = job.get('is_live')
+        is_live = bool(_il) if pd.notna(_il) else False
+        _vs = job.get('vacancy_status')
+        vac_status = _vs if (_vs is not None and pd.notna(_vs)) else job.get('workflow_state', 'Unknown')
 
         days_active = None
         start_date = job.get('start_date')
@@ -345,7 +350,9 @@ def render_performance(df, region_df=None):
         if pd.notna(start_date):
             if pd.notna(end_date):
                 days_active = (end_date - start_date).days
-            elif is_published:
+            elif is_live:
+                # Only a still-live vacancy (no end_date) keeps accruing to today;
+                # a closed/unpublished one stops, instead of growing forever.
                 today = pd.Timestamp(datetime.now())
                 days_active = (today - start_date).days
 
@@ -362,7 +369,7 @@ def render_performance(df, region_df=None):
             'Title': job.get('title', 'Unknown'),
             'Company': job.get('organization_name', 'Unknown'),
             'Job ID': str(job_id),
-            'Status': status,
+            'Status': vac_status,
             'Start Date': start_date if pd.notna(start_date) else None,
             'End Date': end_date if pd.notna(end_date) else None,
             'Days Active': int(days_active) if days_active is not None and days_active > 0 else None,

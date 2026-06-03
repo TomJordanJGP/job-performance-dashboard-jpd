@@ -649,6 +649,10 @@ def render_salary(df, region_df=None):
     display_df = salary_with_data if salary_only else filtered_df[filtered_df['has_salary_data']]
 
     for _, row in display_df.iterrows():
+        # vacancy_status (Published/Unpublished) replaces frozen workflow_state;
+        # fall back to workflow_state if not present yet (deploy→refresh window).
+        _vs = row.get('vacancy_status')
+        vac_status = _vs if (_vs is not None and pd.notna(_vs)) else row.get('workflow_state', '')
         vacancy_data.append({
             'Title': row.get('title', 'Unknown'),
             'Organisation': row.get('organization_name', 'Unknown'),
@@ -658,7 +662,7 @@ def render_salary(df, region_df=None):
             'Annual Max': _fmt_salary(row.get('annual_max_salary')),
             'Currency': row.get('currency_code', ''),
             'Source': row.get('salary_source', ''),
-            'Status': row.get('workflow_state', ''),
+            'Status': vac_status,
             'Type': row.get('employment_type', ''),
             '_sort_salary': row.get('annual_mid_salary', 0) if pd.notna(row.get('annual_mid_salary')) else 0,
         })
