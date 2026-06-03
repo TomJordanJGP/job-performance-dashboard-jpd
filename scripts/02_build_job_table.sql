@@ -398,7 +398,11 @@ UNION ALL
 --    t02 rows for the same vacancy.
 -- ---------------------------------------------------------------------------
 SELECT
-  CAST(NULL AS STRING)                                  AS external_id,
+  -- external_id: self-service jobs are hand-created and never receive a feed
+  -- external_id. Synthesise a unique, collision-proof one (SS-<entity_id>) so they
+  -- don't surface as external_id gaps in analysis. entity_id is non-null and unique
+  -- for these rows, and this segment never joins on external_id, so no merge risk.
+  CONCAT('SS-', ss.entity_id)                           AS external_id,
   ss.entity_id,
   'Self-service'                                        AS source_feed,
 
