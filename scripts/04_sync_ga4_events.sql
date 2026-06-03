@@ -33,4 +33,9 @@ SELECT
   salary_currency, salary_low, salary_high, device, operating_system, browser,
   campaign, medium, source, Events, site
 FROM `jobsgopublic.Datastudio_scheduled_data_combined.Job-performance-detaile_combined` AS src
-WHERE src.event_date >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 5 DAY));
+-- String filter prunes the source on its YYYYMMDD event_date (same 5-day window
+-- the DELETE above applies to event_date_dt). The IS NOT NULL guard drops rows
+-- whose event_date won't parse: without it they'd insert with event_date_dt=NULL,
+-- land in the NULL partition the DELETE never matches, and accumulate forever.
+WHERE src.event_date >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 5 DAY))
+  AND SAFE.PARSE_DATE('%Y%m%d', src.event_date) IS NOT NULL;

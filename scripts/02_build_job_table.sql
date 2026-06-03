@@ -147,14 +147,18 @@ town_to_region AS (
   WHERE rn = 1
 ),
 hq_to_region AS (
+  -- One region per organization_id. GROUP BY guards against the handful of
+  -- duplicate organization_id rows in t04_organisations multiplying t02 rows
+  -- where this is joined on org_id (t3_hq / t3_ss_hq).
   SELECT
     o.organization_id,
-    p.region_name,
-    p.country_name
+    ANY_VALUE(p.region_name)  AS region_name,
+    ANY_VALUE(p.country_name) AS country_name
   FROM `site-monitoring-421401.JPD.t04_organisations` o
   LEFT JOIN `site-monitoring-421401.JPD.t04_postcodes` p
     ON UPPER(TRIM(o.postcode)) = p.postcode
   WHERE o.postcode IS NOT NULL
+  GROUP BY o.organization_id
 ),
 
 -- ---------------------------------------------------------------------------
@@ -347,7 +351,12 @@ SELECT
 FROM joined_with_max
 -- Industry lookup tier 1: ID match. Uses the final (source ▸ Appcast) org_id
 -- — matches the COALESCE in the SELECT above.
-LEFT JOIN `site-monitoring-421401.JPD.t04_organisations` AS orgs_by_id
+LEFT JOIN (
+  SELECT organization_id, ANY_VALUE(industry) AS industry
+  FROM `site-monitoring-421401.JPD.t04_organisations`
+  WHERE organization_id IS NOT NULL
+  GROUP BY organization_id
+) AS orgs_by_id
   ON COALESCE(source_org_id, appcast_org_id) = orgs_by_id.organization_id
 -- Industry lookup tier 2: case-insensitive name match. Only takes effect when
 -- ID match misses, via the COALESCE in the SELECT. Pre-aggregates the lookup
@@ -471,7 +480,12 @@ SELECT
 
 FROM `site-monitoring-421401.JPD.t01_feed_selfservice` AS ss
 -- Same 3-tier industry lookup the main segments use
-LEFT JOIN `site-monitoring-421401.JPD.t04_organisations` AS orgs_ss_by_id
+LEFT JOIN (
+  SELECT organization_id, ANY_VALUE(industry) AS industry
+  FROM `site-monitoring-421401.JPD.t04_organisations`
+  WHERE organization_id IS NOT NULL
+  GROUP BY organization_id
+) AS orgs_ss_by_id
   ON ss.organization_id = orgs_ss_by_id.organization_id
 LEFT JOIN (
   SELECT

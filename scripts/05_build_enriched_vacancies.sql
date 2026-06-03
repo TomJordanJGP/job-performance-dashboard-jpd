@@ -118,11 +118,31 @@ SELECT
   e.importer_ID
 
 FROM `site-monitoring-421401.JPD.t04_vacancy_events` AS e
-LEFT JOIN `site-monitoring-421401.JPD.t02_job_table` AS j
+-- Dedup t02 to ONE row per entity_id before the event join. t02 is keyed on
+-- external_id, so a re-listed vacancy can carry one entity_id across several
+-- external_ids; without this, every GA4 event for that entity_id fans out across
+-- those rows and over-counts clicks/applies. Prefer the live row, then the
+-- latest by end/start date (external_id as a final deterministic tiebreak).
+LEFT JOIN (
+  SELECT * EXCEPT(_rn) FROM (
+    SELECT *, ROW_NUMBER() OVER (
+      PARTITION BY entity_id
+      ORDER BY is_live DESC, end_date DESC, start_date DESC, external_id
+    ) AS _rn
+    FROM `site-monitoring-421401.JPD.t02_job_table`
+    WHERE entity_id IS NOT NULL
+  )
+  WHERE _rn = 1
+) AS j
   ON CAST(e.entity_id AS STRING) = j.entity_id
 -- Industry recovery for orphan events (rows where j.entity_id IS NULL).
 -- Tier 2: match GA4 event's organization_id to t04_organisations.
-LEFT JOIN `site-monitoring-421401.JPD.t04_organisations` AS orgs_event_id
+LEFT JOIN (
+  SELECT organization_id, ANY_VALUE(industry) AS industry
+  FROM `site-monitoring-421401.JPD.t04_organisations`
+  WHERE organization_id IS NOT NULL
+  GROUP BY organization_id
+) AS orgs_event_id
   ON CAST(e.organization_id AS STRING) = orgs_event_id.organization_id
 -- Tier 3: case-insensitive name match. Same pre-aggregation as t02 so
 -- duplicate-name rows in the source don't multiply event rows.
@@ -138,11 +158,14 @@ LEFT JOIN (
 -- Region recovery for orphan events: same chain as industry, but pulling
 -- region_name + country_name from t04_postcodes (via the org's HQ postcode).
 LEFT JOIN (
-  SELECT o.organization_id, p.region_name, p.country_name
+  SELECT o.organization_id,
+         ANY_VALUE(p.region_name)  AS region_name,
+         ANY_VALUE(p.country_name) AS country_name
   FROM `site-monitoring-421401.JPD.t04_organisations` o
   LEFT JOIN `site-monitoring-421401.JPD.t04_postcodes` p
     ON UPPER(TRIM(o.postcode)) = p.postcode
-  WHERE o.postcode IS NOT NULL
+  WHERE o.postcode IS NOT NULL AND o.organization_id IS NOT NULL
+  GROUP BY o.organization_id
 ) AS orgs_event_id_region
   ON CAST(e.organization_id AS STRING) = orgs_event_id_region.organization_id
 LEFT JOIN (

@@ -246,6 +246,11 @@ date_spine AS (
   )) AS d
 ),
 daily_active AS (
+  -- Inequality (range) join: O(days × vacancies). Builds in seconds at current
+  -- scale and the spine grows only ~1 day/day, so it's fine for now. If it ever
+  -- approaches the CI timeout, replace with a sweep-line (delta +1 at start_date,
+  -- -1 at end_date+1, cumulative sum over the spine) — kept as a range join here
+  -- because it's exact and obvious, and a rewrite risks the active_vacancies number.
   SELECT
     ds.event_date,
     COUNT(DISTINCT vs.entity_id_str) AS active_vacancies,
