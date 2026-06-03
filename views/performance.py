@@ -200,6 +200,14 @@ def render_performance(df, region_df=None):
                 },
             )
 
+            if dimension == 'Region':
+                st.caption(
+                    "Clicks/applies are counted in **every** region a vacancy spans "
+                    "(GA4 can't attribute traffic to one location), so a multi-region "
+                    "posting's full total is repeated per region — the Total columns "
+                    "sum to more than the site-wide total. Per-vacancy averages are unaffected."
+                )
+
             csv = benchmark_df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 "Download Benchmark Data",
@@ -320,8 +328,12 @@ def render_performance(df, region_df=None):
     vacancy_data = []
     for _, job in filtered_df.iterrows():
         job_id = job[job_col]
-        clicks = int(job.get('clicks', 0))
-        applies = int(job.get('applies', 0))
+        # job.get(..., 0) only defaults when the key is ABSENT; a present-but-NaN
+        # value (vacancy with no events, or a NULL from BigQuery) would make
+        # int(NaN) raise and crash the whole tab. Coerce NaN to 0 explicitly.
+        _c, _a = job.get('clicks'), job.get('applies')
+        clicks = int(_c) if pd.notna(_c) else 0
+        applies = int(_a) if pd.notna(_a) else 0
         ratio = round((applies / clicks * 100)) if clicks > 0 else 0
 
         status = job.get('workflow_state', 'Unknown')

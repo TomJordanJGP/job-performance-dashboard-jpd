@@ -492,7 +492,12 @@ def process_salary_columns(df):
         unreasonable = (df[col] < 5000) | (df[col] > 500000)
         df.loc[unreasonable, col] = np.nan
 
-    # Mid-point salary
+    # Mid-point salary. NOTE: .mean(axis=1) skips NaN, so a one-sided range
+    # collapses to its single known bound — "from £25k" (no max) becomes mid=£25k,
+    # "up to £40k" (no min) becomes mid=£40k. That's a deliberate imputation (the
+    # one advertised figure), but it does mix true midpoints with single bounds in
+    # the benchmark distribution. If that bias matters, restrict the mid to rows
+    # with BOTH bounds — a methodology change that would shift client-facing numbers.
     df['annual_mid_salary'] = df[['annual_min_salary', 'annual_max_salary']].mean(axis=1)
 
     # Boolean flag

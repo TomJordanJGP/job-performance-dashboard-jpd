@@ -5,6 +5,7 @@ import streamlit as st
 import pandas as pd
 from google.oauth2.service_account import Credentials
 from google.cloud import bigquery
+from google.api_core.exceptions import NotFound, BadRequest
 from datetime import datetime, timedelta
 
 # BigQuery names live in data/config.py (single source of truth — points at the
@@ -90,7 +91,7 @@ def load_all_data(days_back=None, sample_size=None):
             daily_where = ""
         limit_clause = f"LIMIT {sample_size}" if sample_size else ""
 
-        # Core fields always present in dashboard_vacancy_summary
+        # Core fields always present in t06_summary_vacancy
         core_fields = """
             entity_id_str,
             first_event_date,
@@ -112,7 +113,7 @@ def load_all_data(days_back=None, sample_size=None):
             contract_type,
             employment_type"""
 
-        # Salary + sites fields (added after running updated create_aggregated_tables.sql)
+        # Salary + sites fields (present once t06_summary_vacancy carries them)
         salary_fields = """,
             min_salary,
             max_salary,
@@ -166,7 +167,10 @@ def load_all_data(days_back=None, sample_size=None):
         try:
             vacancy_job = client.query(vacancy_query)
             vacancy_job.result()
-        except Exception:
+        except (NotFound, BadRequest):
+            # Salary/sites columns not in the table yet — fall back to core-only.
+            # Narrow catch so transient/auth errors surface instead of silently
+            # dropping columns.
             vacancy_query = f"""
             SELECT {core_fields}
             FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}`
@@ -180,7 +184,8 @@ def load_all_data(days_back=None, sample_size=None):
         try:
             daily_job = client.query(daily_query_full)
             daily_job.result()
-        except Exception:
+        except (NotFound, BadRequest):
+            # GSC/site-split columns not in the table yet — fall back to basic.
             daily_job = client.query(daily_query_basic)
             daily_job.result()
 
@@ -227,8 +232,10 @@ def load_all_data(days_back=None, sample_size=None):
             region_job = client.query(region_query)
             region_job.result()
             region_df = region_job.to_dataframe(create_bqstorage_client=False)
-        except Exception:
-            pass  # Table may not exist yet — views fall back to pipe-split logic
+        except (NotFound, BadRequest):
+            pass  # Table/columns not present yet — views fall back to pipe-split
+                  # logic. Narrow catch: transient/infra errors should surface
+                  # (outer handler), not silently degrade.
 
         # Media-source breakdown per vacancy (one row per source/medium/campaign)
         # Falls back to None if the table doesn't exist yet
@@ -249,19 +256,28 @@ def load_all_data(days_back=None, sample_size=None):
             media_job = client.query(media_query)
             media_job.result()
             media_df = media_job.to_dataframe(create_bqstorage_client=False)
-        except Exception:
-            pass  # Table may not exist yet — client report Media section hides
+        except (NotFound, BadRequest):
+            pass  # Table/columns not present yet — client report Media section
+                  # hides. Narrow catch so transient/infra errors surface.
 
         return vacancy_df, daily_df, region_df, media_df
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
-        st.markdown("""
+        st.markdown(f"""
         **Troubleshooting:**
-        - Check BigQuery tables exist: `dashboard_vacancy_summary` and `dashboard_daily_totals`
+        - Check BigQuery tables exist in `{BQ_PROJECT_ID}.{BQ_DATASET_ID}`: `{BQ_TABLE_ID}` and `{BQ_DAILY_TOTALS_TABLE_ID}`
         - Verify service account has `bigquery.jobs.create` permission
         - Check the tables have data for the requested date range
         """)
         st.stop()
+
+
+@st.cache_data(ttl=14400)
+def get_data_loaded_at():
+    """Wall-clock time the data cache was last populated. Same TTL as
+    load_all_data (and cleared together by the Refresh button), so it reflects
+    the last actual BigQuery fetch — not the current render time."""
+    return datetime.now()
 
 
 @st.cache_data(ttl=300)

@@ -134,13 +134,13 @@ def render_dashboard(df, daily_totals=None, region_df=None):
         daily_data = daily_data.sort_values('event_date')
 
         if trend_granularity == 'Weekly':
-            daily_data['period'] = daily_data['event_date'].dt.to_period('W').apply(lambda p: p.start_time)
+            daily_data['period'] = daily_data['event_date'].dt.to_period('W').dt.start_time
             daily_data = daily_data.groupby('period', as_index=False).agg(
                 clicks=('clicks', 'sum'),
                 applies=('applies', 'sum'),
             ).rename(columns={'period': 'event_date'})
         elif trend_granularity == 'Monthly':
-            daily_data['period'] = daily_data['event_date'].dt.to_period('M').apply(lambda p: p.start_time)
+            daily_data['period'] = daily_data['event_date'].dt.to_period('M').dt.start_time
             daily_data = daily_data.groupby('period', as_index=False).agg(
                 clicks=('clicks', 'sum'),
                 applies=('applies', 'sum'),
@@ -192,14 +192,14 @@ def render_dashboard(df, daily_totals=None, region_df=None):
             trend_data = trend_data.sort_values('event_date')
 
             if granularity == 'Weekly':
-                trend_data['period'] = trend_data['event_date'].dt.to_period('W').apply(lambda p: p.start_time)
+                trend_data['period'] = trend_data['event_date'].dt.to_period('W').dt.start_time
                 trend_data = trend_data.groupby('period', as_index=False).agg(
                     active_vacancies=('active_vacancies', 'mean'),
                     active_jgp=('active_jgp', 'mean'),
                     active_lg=('active_lg', 'mean'),
                 ).rename(columns={'period': 'event_date'})
             elif granularity == 'Monthly':
-                trend_data['period'] = trend_data['event_date'].dt.to_period('M').apply(lambda p: p.start_time)
+                trend_data['period'] = trend_data['event_date'].dt.to_period('M').dt.start_time
                 trend_data = trend_data.groupby('period', as_index=False).agg(
                     active_vacancies=('active_vacancies', 'mean'),
                     active_jgp=('active_jgp', 'mean'),

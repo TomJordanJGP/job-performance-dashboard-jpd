@@ -1551,7 +1551,11 @@ def render_client_report(df, media_df=None):
                     client_occ = client_with_salary[client_with_salary['occupation'] == occ]
                     client_mean = client_occ['annual_mid_salary'].mean()
 
-                    market_occ = df[(df['occupation'] == occ) & (df.get('has_salary_data', False) == True)]
+                    # Market = benchmark_df (date-scoped to the report window and
+                    # excluding the selected client by default, like every other
+                    # benchmark in this report) — not raw df, which would compare
+                    # the client against a market that includes itself, across all time.
+                    market_occ = benchmark_df[(benchmark_df['occupation'] == occ) & (benchmark_df.get('has_salary_data', False) == True)]
                     market_salaries = market_occ['annual_mid_salary'].dropna()
                     national_mean = market_salaries.mean() if len(market_salaries) else np.nan
 
@@ -1561,7 +1565,7 @@ def render_client_report(df, media_df=None):
                     # with <3 market samples are skipped.
                     regional_mean = np.nan
                     regional_n = 0
-                    if client_regions and 'primary_uk_region' in df.columns:
+                    if client_regions and 'primary_uk_region' in benchmark_df.columns:
                         mk = market_occ[market_occ['annual_mid_salary'].notna()].copy()
                         mk['_reg'] = mk['primary_uk_region'].fillna('').str.strip().str.lower()
                         co = client_occ[client_occ['primary_uk_region'].notna()].copy()

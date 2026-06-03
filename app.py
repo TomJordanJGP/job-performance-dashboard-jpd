@@ -1,7 +1,6 @@
 """JGP Job Performance Dashboard - Branded UI version."""
 
 import streamlit as st
-from datetime import datetime
 
 from theme.colors import JGP_LOGOS
 
@@ -19,7 +18,7 @@ inject_css()
 
 # Import modules
 from theme.components import sidebar_logo, main_logo, sidebar_section_header
-from data.loader import load_all_data
+from data.loader import load_all_data, get_data_loaded_at
 from data.processing import (
     prepare_enriched_data,
     apply_importer_mapping,
@@ -57,12 +56,7 @@ def main():
 
     # === DATA LOADING (all data, no date cutoff) ===
     with st.spinner("Loading data..."):
-        # Defensive unpack: tolerates loader returning 3 or 4 values so a
-        # stale @st.cache_data hit on Streamlit Cloud during the rollout
-        # doesn't crash the app. Drop once we've confirmed clean redeploy.
-        loaded = load_all_data(sample_size=None)
-        df_raw, daily_totals, region_raw = loaded[:3]
-        media_df = loaded[3] if len(loaded) >= 4 else None
+        df_raw, daily_totals, region_raw, media_df = load_all_data(sample_size=None)
         df = _process_raw_data(df_raw)
         region_df = _process_raw_data(region_raw) if region_raw is not None else None
 
@@ -96,7 +90,7 @@ def main():
             )
 
         # Footer
-        st.caption(f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        st.caption(f"Last refreshed: {get_data_loaded_at().strftime('%Y-%m-%d %H:%M')}")
         st.caption(f"Total vacancies: {len(df):,}")
         if st.button("Refresh Data", use_container_width=True):
             st.cache_data.clear()

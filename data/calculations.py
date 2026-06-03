@@ -61,7 +61,10 @@ def calculate_metrics(df):
     metrics = {}
     metrics['num_vacancies'] = len(df)
 
-    if 'clicks' in df.columns:
+    # Both columns must be present — callers pass arbitrary subsets, so guarding
+    # on 'clicks' alone risked a KeyError on 'applies'. .sum() already skips NaN.
+    has_metrics = 'clicks' in df.columns and 'applies' in df.columns
+    if has_metrics:
         metrics['total_clicks'] = int(df['clicks'].sum())
         metrics['total_applies'] = int(df['applies'].sum())
     else:
@@ -70,11 +73,13 @@ def calculate_metrics(df):
 
     metrics['apply_click_ratio'] = (metrics['total_applies'] / metrics['total_clicks'] * 100) if metrics['total_clicks'] > 0 else 0
 
-    if metrics['num_vacancies'] > 0 and 'clicks' in df.columns:
+    if metrics['num_vacancies'] > 0 and has_metrics:
         metrics['mean_clicks_per_vacancy'] = metrics['total_clicks'] / metrics['num_vacancies']
         metrics['mean_applies_per_vacancy'] = metrics['total_applies'] / metrics['num_vacancies']
-        metrics['median_clicks_per_vacancy'] = float(np.median(df['clicks'].values))
-        metrics['median_applies_per_vacancy'] = float(np.median(df['applies'].values))
+        # nanmedian, not median: a NULL click/apply from BigQuery would otherwise
+        # turn the median into NaN.
+        metrics['median_clicks_per_vacancy'] = float(np.nanmedian(df['clicks'].values))
+        metrics['median_applies_per_vacancy'] = float(np.nanmedian(df['applies'].values))
         metrics['clicks_per_vacancy'] = metrics['mean_clicks_per_vacancy']
         metrics['applies_per_vacancy'] = metrics['mean_applies_per_vacancy']
     else:
@@ -102,9 +107,19 @@ def calculate_quartile_metrics(df):
     q1_threshold = vacancy_clicks.quantile(0.25)
     q3_threshold = vacancy_clicks.quantile(0.75)
 
-    top_25_mask = vacancy_clicks >= q3_threshold
-    middle_50_mask = (vacancy_clicks >= q1_threshold) & (vacancy_clicks < q3_threshold)
-    bottom_25_mask = vacancy_clicks < q1_threshold
+    if q1_threshold < q3_threshold:
+        top_25_mask = vacancy_clicks >= q3_threshold
+        middle_50_mask = (vacancy_clicks >= q1_threshold) & (vacancy_clicks < q3_threshold)
+        bottom_25_mask = vacancy_clicks < q1_threshold
+    else:
+        # Degenerate spread: when most vacancies share a click count (e.g. lots of
+        # zero-traffic postings) q1 == q3, and value thresholds would dump every
+        # vacancy into "Top 25%". Rank by position instead so the bands stay
+        # ~25/50/25 and the headline tile isn't misleading.
+        pct = vacancy_clicks.rank(method='first', pct=True)
+        bottom_25_mask = pct <= 0.25
+        middle_50_mask = (pct > 0.25) & (pct <= 0.75)
+        top_25_mask = pct > 0.75
 
     quartiles = {}
 
