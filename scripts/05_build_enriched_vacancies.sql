@@ -181,6 +181,13 @@ LEFT JOIN (
 ) AS orgs_event_name_region
   ON LOWER(TRIM(e.organization_name)) = orgs_event_name_region.name_key
 
+-- Exclude known test/demo vacancies. These entity_ids (Test.inc, Google, Dropbox,
+-- GM, Exxon, stripe test, etc.) exist only as orphan GA4 events — no t02 row — so
+-- dropping them here removes them from t05 + t06 durably. A DELETE on t04 would be
+-- re-pulled by the next GA4 sync; this filter survives every rebuild.
+WHERE CAST(e.entity_id AS STRING) NOT IN
+  ('20', '23', '28', '29', '40', '62', '65', '77')
+
 UNION ALL
 
 -- =============================================================================
