@@ -1,0 +1,12 @@
+# Pinned dependencies for the daily-refresh GitHub Action (scripts/daily_refresh.py).
+# Separate from the app's requirements.txt (Streamlit Cloud). Pins are the versions
+# the pipeline was tested against locally — bump deliberately, not implicitly.
+google-cloud-bigquery==3.41.0
+google-auth==2.53.0
+google-auth-oauthlib==1.4.0
+pyarrow==24.0.0
+db-dtypes==1.6.0
+requests==2.34.2
+python-dateutil==2.9.0.post0
+pandas==2.3.3
+gspread==6.2.1

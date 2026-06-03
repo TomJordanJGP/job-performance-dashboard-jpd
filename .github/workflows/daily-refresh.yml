@@ -6,6 +6,12 @@ on:
     - cron: '0 */4 * * *'
   workflow_dispatch:  # Allow manual trigger from GitHub UI
 
+# Never let a manual dispatch overlap a scheduled run (or a slow run overlap the
+# next cron tick) — concurrent pipelines write the same tables and would tear t05/t06.
+concurrency:
+  group: data-refresh
+  cancel-in-progress: false
+
 jobs:
   refresh:
     runs-on: ubuntu-latest
@@ -22,7 +28,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install google-cloud-bigquery google-auth pyarrow db-dtypes requests python-dateutil pandas gspread google-auth-oauthlib
+          pip install -r requirements-pipeline.txt
 
       - name: Create service account file
         run: |

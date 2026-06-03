@@ -64,17 +64,41 @@ FRESHNESS_DAYS = 14
 
 
 def merge_cfg(feed):
-    """MERGE config derived from feed kind (mirrors the old per-feed MERGE_CFG
-    exactly). Appcast is the registry overlay — site-created jobs have only
-    entity_id, so it matches on entity_id OR external_id and protects entity_id
-    from being overwritten. Every other feed is keyed on external_id."""
+    """Per-feed MERGE config: the protected `stable` key (never overwritten on
+    UPDATE so a site-created job's entity_id survives) and the target table
+    clustering. The match/dedup logic lives in merge_passes() — Appcast needs
+    two single-key passes, every other feed one."""
     if feed["feed_kind"] == "appcast":
-        return dict(match="T.entity_id = S.entity_id OR T.external_id = S.external_id",
-                    dedup_key="entity_id", stable="entity_id",
-                    cluster=["entity_id", "external_id"])
-    return dict(match="T.external_id = S.external_id",
-                dedup_key="external_id", stable="external_id",
-                cluster=["external_id"])
+        return dict(stable="entity_id", cluster=["entity_id", "external_id"])
+    return dict(stable="external_id", cluster=["external_id"])
+
+
+# Recency expression per feed shape — drives the deterministic dedup tiebreak
+# (newest record wins when a feed broadcasts the same id twice in one poll).
+RECENCY_BY_SHAPE = {
+    "appcast": "COALESCE(date_posted, date_end)",
+    "ats": "COALESCE(updated, created, start_date)",
+    "scrape": "start_date",
+    "civil_service": "start_date",
+}
+
+
+def merge_passes(feed):
+    """Ordered MERGE passes. Appcast matched on a single OR-clause
+    (entity_id OR external_id) can match one target row from TWO source rows,
+    which BigQuery rejects — aborting the whole MERGE. Instead Appcast runs two
+    disjoint single-key passes: entity_id for rows that carry it (≈all of them;
+    the UPDATE then fills external_id), external_id for the rare residual. A
+    single-key pass deduped on that same key can match at most one source row
+    per target, so the abort can't happen. Source feeds: one external_id pass."""
+    if feed["feed_kind"] == "appcast":
+        return [
+            dict(key="entity_id", match="T.entity_id = S.entity_id",
+                 where="entity_id IS NOT NULL"),
+            dict(key="external_id", match="T.external_id = S.external_id",
+                 where="entity_id IS NULL AND external_id IS NOT NULL"),
+        ]
+    return [dict(key="external_id", match="T.external_id = S.external_id", where=None)]
 
 
 # --------------------------------------------------------------------------- #
@@ -382,30 +406,45 @@ def run_merge(client, feed, target_id, staging_id, content_cols, run_ts):
     cfg = merge_cfg(feed)
     ts = f'TIMESTAMP("{run_ts}")'
     hash_struct = ', '.join(content_cols)
+    recency = RECENCY_BY_SHAPE.get(feed['shape'], 'start_date')
     set_cols = [c for c in content_cols if c != cfg['stable']]
     set_clause = ',\n      '.join(f'T.{c} = S.{c}' for c in set_cols)
     insert_cols = content_cols + ['content_hash', 'first_seen', 'last_seen', 'last_updated']
     insert_vals = [f'S.{c}' for c in content_cols] + ['S.content_hash', ts, ts, ts]
-    sql = f"""
-    MERGE `{target_id}` T
-    USING (
-      SELECT *, FARM_FINGERPRINT(TO_JSON_STRING(STRUCT({hash_struct}))) AS content_hash
-      FROM `{staging_id}`
-      QUALIFY ROW_NUMBER() OVER (PARTITION BY {cfg['dedup_key']} ORDER BY {cfg['dedup_key']}) = 1
-    ) S
-    ON {cfg['match']}
-    WHEN MATCHED THEN UPDATE SET
-      {set_clause},
-      last_seen = {ts},
-      last_updated = IF(T.content_hash != S.content_hash, {ts}, T.last_updated),
-      content_hash = S.content_hash
-    WHEN NOT MATCHED THEN INSERT ({', '.join(insert_cols)})
-    VALUES ({', '.join(insert_vals)})
-    """
-    job = client.query(sql)
-    job.result()
+
+    total = 0
+    for p in merge_passes(feed):
+        where = f"WHERE {p['where']}" if p.get('where') else ""
+        # Dedup this pass's slice to one row per match key (newest wins via the
+        # recency tiebreak), then MERGE on that single key — never an OR-clause,
+        # so a target row can match at most one source row.
+        sql = f"""
+        MERGE `{target_id}` T
+        USING (
+          SELECT * EXCEPT(_rn),
+                 FARM_FINGERPRINT(TO_JSON_STRING(STRUCT({hash_struct}))) AS content_hash
+          FROM (
+            SELECT *, ROW_NUMBER() OVER (
+              PARTITION BY {p['key']} ORDER BY {recency} DESC) AS _rn
+            FROM `{staging_id}`
+            {where}
+          )
+          WHERE _rn = 1
+        ) S
+        ON {p['match']}
+        WHEN MATCHED THEN UPDATE SET
+          {set_clause},
+          last_seen = {ts},
+          last_updated = IF(T.content_hash != S.content_hash, {ts}, T.last_updated),
+          content_hash = S.content_hash
+        WHEN NOT MATCHED THEN INSERT ({', '.join(insert_cols)})
+        VALUES ({', '.join(insert_vals)})
+        """
+        job = client.query(sql)
+        job.result()
+        total += job.num_dml_affected_rows or 0
     client.query(f"DROP TABLE `{staging_id}`").result()
-    return job.num_dml_affected_rows
+    return total
 
 
 def _pct(num, den):
@@ -588,6 +627,15 @@ def main():
     write_run_log(client, run_rows)
     print(f"  logged {len(run_rows)} run rows to t00_feed_runs")
     print(f"\n{'='*72}\nCompleted in {(datetime.now() - start).total_seconds():.0f}s")
+
+    # A feed whose MERGE threw is logged above and to t00_feed_runs, but the
+    # other feeds still upserted. Exit 2 (completed-with-errors) so the
+    # orchestrator can flag the whole run as failed while still rebuilding
+    # downstream from the Bronze data that did update.
+    errored = [r['feed_name'] for r in run_rows if r['status'] == 'error']
+    if errored:
+        print(f"WARNING: {len(errored)} feed(s) failed to MERGE: {', '.join(errored)}")
+        sys.exit(2)
 
 
 if __name__ == '__main__':
