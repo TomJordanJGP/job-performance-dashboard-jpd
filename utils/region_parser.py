@@ -54,8 +54,8 @@ POSTCODE_REGIONS = {
     'IP': 'East of England', 'LU': 'East of England', 'NR': 'East of England',
     'PE': 'East of England', 'SG': 'East of England', 'SS': 'East of England',
 
-    # East Midlands
-    'DE': 'East Midlands', 'DN': 'East Midlands', 'LE': 'East Midlands',
+    # East Midlands ('DN' belongs to Yorkshire — Doncaster — see below)
+    'DE': 'East Midlands', 'LE': 'East Midlands',
     'LN': 'East Midlands', 'NG': 'East Midlands', 'NN': 'East Midlands',
 
     # West Midlands
@@ -88,9 +88,9 @@ POSTCODE_REGIONS = {
     'KA': 'Scotland', 'KW': 'Scotland', 'KY': 'Scotland', 'ML': 'Scotland',
     'PA': 'Scotland', 'PH': 'Scotland', 'TD': 'Scotland', 'ZE': 'Scotland',
 
-    # Wales
+    # Wales ('SY' is predominantly Shropshire/England — mapped to West Midlands above)
     'CF': 'Wales', 'LD': 'Wales', 'LL': 'Wales', 'NP': 'Wales',
-    'SA': 'Wales', 'SY': 'Wales',
+    'SA': 'Wales',
 
     # Northern Ireland
     'BT': 'Northern Ireland',
