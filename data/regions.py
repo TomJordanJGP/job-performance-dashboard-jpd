@@ -9,7 +9,7 @@ COUNTRY_REGIONS = {
         'East Midlands',
         'West Midlands',
         'East of England',
-        'Greater London',
+        'London',
         'South East',
         'South West',
     ],
