@@ -253,21 +253,46 @@ date_spine AS (
     CURRENT_DATE()
   )) AS d
 ),
+vac_effective AS (
+  -- Per-vacancy effective close date. The ~39% of vacancies with no explicit
+  -- end_date otherwise never expire from the live count, inflating it ~5x
+  -- (24k shown vs ~4.5k truly live). Rules (agreed 2026-06-14):
+  --   * has explicit end_date         -> trust it
+  --   * no end_date, still in feed     -> open (is_live = seen in feed within 24h)
+  --   * no end_date, dropped from feed -> closed at last GA4 interaction
+  --                                       (last_event_date), held open until that
+  --                                       date is >= 3 days old so a brief click-gap
+  --                                       isn't mistaken for expiry
+  --   * no end_date, no traffic ever   -> closed at start_date (edge; ~0 rows today)
+  SELECT
+    entity_id_str,
+    sites,
+    DATE(start_date) AS start_d,
+    CASE
+      WHEN end_date IS NOT NULL THEN DATE(end_date)
+      WHEN is_live THEN NULL
+      WHEN last_event_date IS NULL THEN DATE(start_date)
+      WHEN DATE(last_event_date) > DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY) THEN NULL
+      ELSE DATE(last_event_date)
+    END AS end_d
+  FROM `site-monitoring-421401.JPD.t06_summary_vacancy`
+),
 daily_active AS (
-  -- Inequality (range) join: O(days × vacancies). Builds in seconds at current
-  -- scale and the spine grows only ~1 day/day, so it's fine for now. If it ever
-  -- approaches the CI timeout, replace with a sweep-line (delta +1 at start_date,
-  -- -1 at end_date+1, cumulative sum over the spine) — kept as a range join here
-  -- because it's exact and obvious, and a rewrite risks the active_vacancies number.
+  -- "Live on day D" = D falls between the vacancy's start and its effective close
+  -- date (vac_effective). Inequality (range) join: O(days × vacancies); builds in
+  -- seconds at current scale and the spine grows ~1 day/day. If it ever nears the
+  -- CI timeout, replace with a sweep-line (delta +1 at start, -1 at end+1,
+  -- cumulative sum over the spine) — kept as a range join here because it's exact
+  -- and obvious.
   SELECT
     ds.event_date,
-    COUNT(DISTINCT vs.entity_id_str) AS active_vacancies,
-    COUNT(DISTINCT IF(vs.sites LIKE '%Jobs Go Public%', vs.entity_id_str, NULL)) AS active_jgp,
-    COUNT(DISTINCT IF(vs.sites LIKE '%LG Jobs%',        vs.entity_id_str, NULL)) AS active_lg
+    COUNT(DISTINCT ve.entity_id_str) AS active_vacancies,
+    COUNT(DISTINCT IF(ve.sites LIKE '%Jobs Go Public%', ve.entity_id_str, NULL)) AS active_jgp,
+    COUNT(DISTINCT IF(ve.sites LIKE '%LG Jobs%',        ve.entity_id_str, NULL)) AS active_lg
   FROM date_spine ds
-  LEFT JOIN `site-monitoring-421401.JPD.t06_summary_vacancy` vs
-    ON ds.event_date >= DATE(vs.start_date)
-    AND (ds.event_date <= DATE(vs.end_date) OR vs.end_date IS NULL)
+  LEFT JOIN vac_effective ve
+    ON ds.event_date >= ve.start_d
+    AND (ds.event_date <= ve.end_d OR ve.end_d IS NULL)
   GROUP BY ds.event_date
 )
 SELECT
