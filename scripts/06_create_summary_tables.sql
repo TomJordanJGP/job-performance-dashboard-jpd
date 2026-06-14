@@ -253,10 +253,27 @@ date_spine AS (
     CURRENT_DATE()
   )) AS d
 ),
+vac_frontends AS (
+  -- Board-membership signal from the source feeds: `frontends` is a comma-
+  -- separated list of the JGP sites a vacancy is posted on (jobsgopublic /
+  -- lgjobs). Keyed by external_id; covers ~98% of LIVE vacancies. Older expired
+  -- vacancies predate frontends population (mostly NULL) — those fall back to the
+  -- GA4 `sites` (traffic) signal below. Appcast (the master) does not emit
+  -- frontends, so this reads the source-feed Bronze tables directly.
+  SELECT external_id, ANY_VALUE(frontends) AS frontends FROM (
+    SELECT external_id, frontends FROM `site-monitoring-421401.JPD.t01_feed_ats`                 WHERE frontends IS NOT NULL
+    UNION ALL SELECT external_id, frontends FROM `site-monitoring-421401.JPD.t01_feed_scrape`              WHERE frontends IS NOT NULL
+    UNION ALL SELECT external_id, frontends FROM `site-monitoring-421401.JPD.t01_feed_civil_service`       WHERE frontends IS NOT NULL
+    UNION ALL SELECT external_id, frontends FROM `site-monitoring-421401.JPD.t01_feed_backfill`            WHERE frontends IS NOT NULL
+    UNION ALL SELECT external_id, frontends FROM `site-monitoring-421401.JPD.t01_feed_jgp_london_backfill` WHERE frontends IS NOT NULL
+  )
+  GROUP BY external_id
+),
 vac_effective AS (
-  -- Per-vacancy effective close date. The ~39% of vacancies with no explicit
-  -- end_date otherwise never expire from the live count, inflating it ~5x
-  -- (24k shown vs ~4.5k truly live). Rules (agreed 2026-06-14):
+  -- Per-vacancy effective close date + board membership.
+  --
+  -- Close date — the ~39% of vacancies with no explicit end_date otherwise never
+  -- expire from the live count, inflating it ~5x (24k shown vs ~4.5k truly live):
   --   * has explicit end_date         -> trust it
   --   * no end_date, still in feed     -> open (is_live = seen in feed within 24h)
   --   * no end_date, dropped from feed -> closed at last GA4 interaction
@@ -264,31 +281,40 @@ vac_effective AS (
   --                                       date is >= 3 days old so a brief click-gap
   --                                       isn't mistaken for expiry
   --   * no end_date, no traffic ever   -> closed at start_date (edge; ~0 rows today)
+  --
+  -- Board (on_jgp / on_lg) — the feed `frontends` list is authoritative; GA4
+  -- `sites` (traffic) is the fallback so a live vacancy with no clicks yet still
+  -- lands on the right board, and older expired vacancies without frontends still
+  -- split. A vacancy can be on both boards (counts in both bars; active_vacancies
+  -- is the deduplicated total).
   SELECT
-    entity_id_str,
-    sites,
-    DATE(start_date) AS start_d,
+    v.entity_id_str,
+    DATE(v.start_date) AS start_d,
     CASE
-      WHEN end_date IS NOT NULL THEN DATE(end_date)
-      WHEN is_live THEN NULL
-      WHEN last_event_date IS NULL THEN DATE(start_date)
-      WHEN DATE(last_event_date) > DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY) THEN NULL
-      ELSE DATE(last_event_date)
-    END AS end_d
-  FROM `site-monitoring-421401.JPD.t06_summary_vacancy`
+      WHEN v.end_date IS NOT NULL THEN DATE(v.end_date)
+      WHEN v.is_live THEN NULL
+      WHEN v.last_event_date IS NULL THEN DATE(v.start_date)
+      WHEN DATE(v.last_event_date) > DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY) THEN NULL
+      ELSE DATE(v.last_event_date)
+    END AS end_d,
+    COALESCE(f.frontends LIKE '%jobsgopublic%' OR v.sites LIKE '%Jobs Go Public%', FALSE) AS on_jgp,
+    COALESCE(f.frontends LIKE '%lgjobs%'       OR v.sites LIKE '%LG Jobs%',        FALSE) AS on_lg
+  FROM `site-monitoring-421401.JPD.t06_summary_vacancy` v
+  LEFT JOIN vac_frontends f ON v.external_id = f.external_id
 ),
 daily_active AS (
   -- "Live on day D" = D falls between the vacancy's start and its effective close
-  -- date (vac_effective). Inequality (range) join: O(days × vacancies); builds in
-  -- seconds at current scale and the spine grows ~1 day/day. If it ever nears the
-  -- CI timeout, replace with a sweep-line (delta +1 at start, -1 at end+1,
-  -- cumulative sum over the spine) — kept as a range join here because it's exact
-  -- and obvious.
+  -- date (vac_effective). active_jgp/active_lg split by board membership (a both-
+  -- boards vacancy counts in both; active_vacancies is the dedup total). Inequality
+  -- (range) join: O(days × vacancies); builds in seconds at current scale and the
+  -- spine grows ~1 day/day. If it ever nears the CI timeout, replace with a
+  -- sweep-line (delta +1 at start, -1 at end+1, cumulative sum over the spine) —
+  -- kept as a range join here because it's exact and obvious.
   SELECT
     ds.event_date,
     COUNT(DISTINCT ve.entity_id_str) AS active_vacancies,
-    COUNT(DISTINCT IF(ve.sites LIKE '%Jobs Go Public%', ve.entity_id_str, NULL)) AS active_jgp,
-    COUNT(DISTINCT IF(ve.sites LIKE '%LG Jobs%',        ve.entity_id_str, NULL)) AS active_lg
+    COUNT(DISTINCT IF(ve.on_jgp, ve.entity_id_str, NULL)) AS active_jgp,
+    COUNT(DISTINCT IF(ve.on_lg,  ve.entity_id_str, NULL)) AS active_lg
   FROM date_spine ds
   LEFT JOIN vac_effective ve
     ON ds.event_date >= ve.start_d
