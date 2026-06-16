@@ -121,6 +121,13 @@ client_hq_addresses_Final.xlsx
 IDs Update Template.xlsx
 IDs_Update_Template.xltx
 
+# Jobiqo taxonomy + job-alert exports — one-off downloads used to enrich/classify
+# (data lives in BigQuery, not the repo). Job-alert files are PII-adjacent
+# (recipient saved-search data) and must never reach the public deploy repo.
+*_export.csv
+job_alerts_path*.csv
+job-alert-export*.xlsx
+
 # Renewals working copies (template Renewals.pptx stays tracked)
 Renewals (*).pptx
 Renewals copy.pptx
