@@ -150,3 +150,7 @@ session_handoff.md
 # Local workspace folders for triaging working files
 /outputs/
 /to_delete/
+
+# One-off scripts recovered from a parked stash (audit/export tooling, kept local,
+# not part of the pipeline). Move into scripts/ if any are worth tracking.
+/recovered_from_stash/
