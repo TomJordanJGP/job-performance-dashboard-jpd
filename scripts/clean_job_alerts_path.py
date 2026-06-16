@@ -99,13 +99,25 @@ def main():
     path = path.drop_duplicates(subset="alert_id", keep="first").reset_index(drop=True)
     n_unique = len(path)
 
-    # 4) Build the clean, exploded rows
+    # 4) Normalise Created -> ISO date only (yyyy-mm-dd); time lives in created_time.
+    #    This export stores Created as a real Excel date, so pandas hands us an ISO
+    #    datetime string ("2024-06-10 00:00:00"). Parse with that EXPLICIT format so
+    #    there is no day/month guessing (dayfirst on an ISO string corrupts it); the
+    #    n_baddate canary below will loudly flag any future export whose format
+    #    differs, instead of silently mis-parsing. ISO text round-trips cleanly
+    #    through Google Sheets + BigQuery.
+    parsed = pd.to_datetime(path["Created"], format="%Y-%m-%d %H:%M:%S", errors="coerce")
+    path["created_date_iso"] = parsed.dt.strftime("%Y-%m-%d")
+    n_baddate = int(path["created_date_iso"].isna().sum())
+    path["created_date_iso"] = path["created_date_iso"].fillna("")
+
+    # 5) Build the clean, exploded rows
     rows = []
     for _, r in path.iterrows():
         rows.append({
             "alert_id": r["alert_id"],
             "alert_type": clean_single(r["Type"]),
-            "created_date": clean_single(r["Created"]),
+            "created_date": r["created_date_iso"],
             "created_time": clean_single(r["Time"]),
             "activated": clean_single(r["Activated"]),
             "notification_interval": clean_single(r["Notification interval"]),
@@ -127,6 +139,7 @@ def main():
     print(f"path alerts (empty Search)    : {n_path}")
     print(f"after dropping no-filter rows : {n_filtered}")
     print(f"unique alerts (deduped)       : {n_unique}")
+    print(f"unparseable created dates     : {n_baddate}")
     print(f"wrote {args.out}")
 
 
