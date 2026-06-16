@@ -154,3 +154,7 @@ session_handoff.md
 # One-off scripts recovered from a parked stash (audit/export tooling, kept local,
 # not part of the pipeline). Move into scripts/ if any are worth tracking.
 /recovered_from_stash/
+
+# Internal docs + Apps Script kept local only — never published to the public repo
+# (DATA_FLOW.md, upstream_flow.md, google-apps-script/ — the last carries a GA4 Sheet ID).
+/internal/
