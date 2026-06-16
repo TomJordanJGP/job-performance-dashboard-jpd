@@ -14,10 +14,11 @@ All columns land as STRING — created_date is ISO 'yyyy-mm-dd' text that mirror
 the Sheet exactly and SAFE_CASTs to DATE in the analysis views.
 
 Auth: service_account.json — Sheets scope to read the tab, BigQuery scope to load.
-Re-runnable. Intended to run inside scripts/daily_refresh.py.
+Spreadsheet id: --sheet-id or the JPD_JOB_ALERTS_SHEET_ID env var (kept out of tracked code).
+Re-runnable. Run on demand via scripts/refresh_job_alerts.py after a fresh export.
 """
 import argparse
-import re
+import os
 
 import gspread
 import pandas as pd
@@ -28,7 +29,7 @@ PROJECT = "site-monitoring-421401"
 DATASET = "JPD"
 TARGET = f"{PROJECT}.{DATASET}.t04_job_alerts_path"
 STAGE = f"{PROJECT}.{DATASET}.t04_job_alerts_path_stage"
-SPREADSHEET_ID = "17KIYg5jlb6Pu__Y6yjPooInu6T6Ob27udm-dEE0ftU4"
+SHEET_ID_ENV = "JPD_JOB_ALERTS_SHEET_ID"  # Sheet id stays out of tracked code
 TAB = "Path"
 
 COLUMNS = ["alert_id", "alert_type", "created_date", "created_time", "activated",
@@ -55,10 +56,10 @@ DESCRIPTION = (
 )
 
 
-def read_sheet(creds_path):
+def read_sheet(creds_path, sheet_id):
     creds = Credentials.from_service_account_file(
         creds_path, scopes=["https://www.googleapis.com/auth/spreadsheets"])
-    ws = gspread.authorize(creds).open_by_key(SPREADSHEET_ID).worksheet(TAB)
+    ws = gspread.authorize(creds).open_by_key(sheet_id).worksheet(TAB)
     vals = ws.get_all_values()
     return pd.DataFrame(vals[1:], columns=vals[0])
 
@@ -66,9 +67,13 @@ def read_sheet(creds_path):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--creds", default="service_account.json")
+    ap.add_argument("--sheet-id", default=os.environ.get(SHEET_ID_ENV),
+                    help=f"JPD_Job_Alerts spreadsheet id (or set ${SHEET_ID_ENV})")
     args = ap.parse_args()
+    if not args.sheet_id:
+        raise SystemExit(f"No spreadsheet id — pass --sheet-id or set ${SHEET_ID_ENV}")
 
-    df = read_sheet(args.creds)
+    df = read_sheet(args.creds, args.sheet_id)
     if list(df.columns) != COLUMNS:
         raise SystemExit(f"sheet columns {list(df.columns)} != expected {COLUMNS}")
 

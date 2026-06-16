@@ -11,8 +11,11 @@ Reference loaders are manual here by design (daily_refresh.py excludes 00_load_*
 and the alerts Sheet only changes when you re-export — so this runs on demand,
 only when there's genuinely new data.
 
+The spreadsheet id comes from --sheet-id or the JPD_JOB_ALERTS_SHEET_ID env var
+(kept out of tracked code) and is forwarded to the sync + load steps.
+
 Run from the project root (where service_account.json and the .xlsx live):
-    venv/bin/python scripts/refresh_job_alerts.py --xlsx job-alert-export-XXXXXXXXXX.xlsx
+    JPD_JOB_ALERTS_SHEET_ID=<id> venv/bin/python scripts/refresh_job_alerts.py --xlsx <export>.xlsx
 """
 import argparse
 import os
@@ -38,12 +41,15 @@ def main():
                     help="Path to the fresh JGP job-alert export")
     ap.add_argument("--csv", default="job_alerts_path_clean.csv",
                     help="Intermediate cleaned CSV path")
+    ap.add_argument("--sheet-id", default=os.environ.get("JPD_JOB_ALERTS_SHEET_ID"),
+                    help="JPD_Job_Alerts spreadsheet id (or set $JPD_JOB_ALERTS_SHEET_ID)")
     args = ap.parse_args()
 
+    sheet_args = ["--sheet-id", args.sheet_id] if args.sheet_id else []
     overall = time.time()
     run("1/3 clean + explode", "clean_job_alerts_path.py", "--xlsx", args.xlsx, "--out", args.csv)
-    run("2/3 sync to Google Sheet", "sync_job_alerts_to_sheet.py", "--csv", args.csv)
-    run("3/3 load to BigQuery", "00_load_job_alerts_path.py")
+    run("2/3 sync to Google Sheet", "sync_job_alerts_to_sheet.py", "--csv", args.csv, *sheet_args)
+    run("3/3 load to BigQuery", "00_load_job_alerts_path.py", *sheet_args)
     print(f"\nRefresh complete in {time.time() - overall:.0f}s", flush=True)
 
 

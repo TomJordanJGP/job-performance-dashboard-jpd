@@ -13,16 +13,18 @@ All writes use gspread's RAW value-input (the default), so ISO dates
 coerce dates to serials and numeric-looking ids to numbers.
 
 Auth: service_account.json with the Sheets scope; the SA must be Editor on the Sheet.
+Spreadsheet id: --sheet-id or the JPD_JOB_ALERTS_SHEET_ID env var (kept out of tracked code).
 Run after scripts/clean_job_alerts_path.py has produced the CSV.
 """
 import argparse
+import os
 
 import gspread
 import pandas as pd
 from google.oauth2.service_account import Credentials
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-SPREADSHEET_ID = "17KIYg5jlb6Pu__Y6yjPooInu6T6Ob27udm-dEE0ftU4"
+SHEET_ID_ENV = "JPD_JOB_ALERTS_SHEET_ID"  # Sheet id stays out of tracked code
 TAB = "Path"
 KEY = "alert_id"
 MUTABLE = ["activated", "notification_interval"]  # updatable on an existing alert
@@ -31,10 +33,13 @@ MUTABLE = ["activated", "notification_interval"]  # updatable on an existing ale
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--csv", default="job_alerts_path_clean.csv")
-    ap.add_argument("--sheet-id", default=SPREADSHEET_ID)
+    ap.add_argument("--sheet-id", default=os.environ.get(SHEET_ID_ENV),
+                    help=f"JPD_Job_Alerts spreadsheet id (or set ${SHEET_ID_ENV})")
     ap.add_argument("--tab", default=TAB)
     ap.add_argument("--creds", default="service_account.json")
     args = ap.parse_args()
+    if not args.sheet_id:
+        raise SystemExit(f"No spreadsheet id — pass --sheet-id or set ${SHEET_ID_ENV}")
 
     df = pd.read_csv(args.csv, dtype=str).fillna("")
     cols = list(df.columns)
