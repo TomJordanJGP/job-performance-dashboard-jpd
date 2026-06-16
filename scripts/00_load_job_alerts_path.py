@@ -88,12 +88,18 @@ def main():
     client.create_table(tbl, exists_ok=True)
 
     before = client.get_table(TARGET).num_rows
-    client.load_table_from_dataframe(
-        df, STAGE,
-        job_config=bigquery.LoadJobConfig(schema=SCHEMA, write_disposition="WRITE_TRUNCATE"),
-    ).result()
-    merge = client.query(MERGE_SQL)
-    merge.result()
+    # STAGE is a transient buffer the MERGE reads from — load it, merge, then
+    # always drop it so only the final table persists (finally = cleaned up even
+    # if the MERGE fails).
+    try:
+        client.load_table_from_dataframe(
+            df, STAGE,
+            job_config=bigquery.LoadJobConfig(schema=SCHEMA, write_disposition="WRITE_TRUNCATE"),
+        ).result()
+        merge = client.query(MERGE_SQL)
+        merge.result()
+    finally:
+        client.delete_table(STAGE, not_found_ok=True)
     after = client.get_table(TARGET).num_rows
 
     print(f"sheet rows read     : {len(df)}")
