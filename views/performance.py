@@ -13,6 +13,16 @@ from theme.components import (
     kpi_card, page_header, filter_tags, section_header,
     branded_divider, empty_state,
 )
+
+
+def _to_date(value):
+    """Normalise a datetime / pandas Timestamp / date to a plain date for
+    day-difference math. Vacancy dates arrive as native Python objects (BigQuery
+    returns object dtype because a few junk feed dates fall outside pandas'
+    1677–2262 Timestamp range), so diffing on .date() avoids overflow."""
+    if isinstance(value, datetime):  # covers datetime.datetime and pd.Timestamp
+        return value.date()
+    return value  # already a datetime.date
 from theme.colors import JGP_COLORS, JGP_PLOTLY_TEMPLATE, JGP_HEATMAP_COLORSCALE
 
 
@@ -346,15 +356,23 @@ def render_performance(df, region_df=None):
 
         days_active = None
         start_date = job.get('start_date')
-        end_date = job.get('end_date')
+        # Close date: prefer end_date_est (feed drop-out date fills the ~36% of
+        # closed vacancies with no explicit end_date). A still-live vacancy with no
+        # end_date has end_date_est = NULL and stays blank. Fall back to the raw
+        # end_date if the estimate column isn't in the table yet (pre-refresh).
+        # Values are native datetime/date objects (BQ returns object dtype because a
+        # few junk feed dates fall outside pandas' 1677–2262 Timestamp range) — keep
+        # them native and diff on .date() so those extremes don't overflow.
+        _ede = job.get('end_date_est')
+        end_date = _ede if pd.notna(_ede) else job.get('end_date')
+        end_date = end_date if pd.notna(end_date) else None
         if pd.notna(start_date):
-            if pd.notna(end_date):
-                days_active = (end_date - start_date).days
+            if end_date is not None:
+                days_active = (_to_date(end_date) - _to_date(start_date)).days
             elif is_live:
                 # Only a still-live vacancy (no end_date) keeps accruing to today;
                 # a closed/unpublished one stops, instead of growing forever.
-                today = pd.Timestamp(datetime.now())
-                days_active = (today - start_date).days
+                days_active = (datetime.now().date() - _to_date(start_date)).days
 
         occupation = job.get('occupation', 'Unknown')
         if pd.isna(occupation) or not str(occupation).strip():

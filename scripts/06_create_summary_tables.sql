@@ -122,7 +122,29 @@ regions AS (
   FROM _vacancy_locations_resolved
   WHERE uk_region IS NOT NULL
   GROUP BY entity_id
-)
+),
+-- Feed drop-out date: MAX(last_seen) per entity_id across every feed that carries
+-- it (all t01_feed_* except selfservice, which has no feed poll). Keyed on
+-- entity_id ONLY. external_id is a content hash, NOT unique: the same hash maps to
+-- multiple entity_ids for re-listed/duplicate content, so an external_id match
+-- would pull an unrelated live vacancy's last_seen onto a closed one (verified:
+-- entity 24103 got today's date from twin entity 67141 that shares its hash). The
+-- Appcast overlay backfills entity_id onto the source-feed rows, so entity_id
+-- alone gives full coverage — identical to the external_id-inclusive join.
+feed_ls_by_entity AS (
+  SELECT CAST(entity_id AS STRING) AS entity_id_str, MAX(last_seen) AS ls
+  FROM (
+              SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_appcast`
+    UNION ALL SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_ats`
+    UNION ALL SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_scrape`
+    UNION ALL SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_civil_service`
+    UNION ALL SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_backfill`
+    UNION ALL SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_jgp_london_backfill`
+  )
+  WHERE entity_id IS NOT NULL
+  GROUP BY entity_id_str
+),
+vac AS (
 SELECT
   a.entity_id AS entity_id_str,
   a.first_event_date,
@@ -157,11 +179,37 @@ SELECT
   a.salary_free_text,
   a.salary_exact,
   a.salary_unit,
-  a.sites
+  a.sites,
+  -- feed drop-out date: this entity's last appearance in any feed
+  DATE(be.ls) AS feed_last_seen
 FROM agg a
 LEFT JOIN regions r USING (entity_id)
 LEFT JOIN `site-monitoring-421401.JPD.t04_importers` imp
-  ON a.importer_ID = imp.importer_id;
+  ON a.importer_ID = imp.importer_id
+LEFT JOIN feed_ls_by_entity be ON be.entity_id_str = a.entity_id
+)
+SELECT
+  vac.*,
+  -- end_date_est: the close date shown on the dashboard. Real end_date wins; a
+  -- still-live vacancy with no end_date stays open (NULL); otherwise it has dropped
+  -- out of the feed, so estimate from the drop-out date (feed last_seen), falling
+  -- back to the last GA4 interaction only where the feed date is missing (~0.3%).
+  CASE
+    WHEN vac.end_date IS NOT NULL        THEN DATE(vac.end_date)
+    WHEN vac.is_live                     THEN NULL
+    WHEN vac.feed_last_seen IS NOT NULL  THEN vac.feed_last_seen
+    WHEN vac.last_event_date IS NOT NULL THEN vac.last_event_date
+    ELSE NULL
+  END AS end_date_est,
+  -- provenance for the value above, so the UI can distinguish estimates
+  CASE
+    WHEN vac.end_date IS NOT NULL        THEN 'actual'
+    WHEN vac.is_live                     THEN 'still_live'
+    WHEN vac.feed_last_seen IS NOT NULL  THEN 'feed_dropout'
+    WHEN vac.last_event_date IS NOT NULL THEN 'last_event'
+    ELSE NULL
+  END AS end_date_source
+FROM vac;
 
 
 -- ===========================================================================
@@ -273,14 +321,17 @@ vac_effective AS (
   -- Per-vacancy effective close date + board membership.
   --
   -- Close date — the ~39% of vacancies with no explicit end_date otherwise never
-  -- expire from the live count, inflating it ~5x (24k shown vs ~4.5k truly live):
-  --   * has explicit end_date         -> trust it
-  --   * no end_date, still in feed     -> open (is_live = seen in feed within 24h)
-  --   * no end_date, dropped from feed -> closed at last GA4 interaction
-  --                                       (last_event_date), held open until that
-  --                                       date is >= 3 days old so a brief click-gap
-  --                                       isn't mistaken for expiry
-  --   * no end_date, no traffic ever   -> closed at start_date (edge; ~0 rows today)
+  -- expire from the live count, inflating it ~5x (24k shown vs ~4.5k truly live).
+  -- Uses the SAME estimator as the vacancy table: end_date_est (real end_date ->
+  -- if live: open -> feed drop-out date -> last GA4 interaction). Feed drop-out
+  -- (last_seen) is preferred over last_event_date because last_event trails the
+  -- true close by ~20 days median (residual/crawler traffic on an expired page):
+  --   * has explicit end_date         -> trust it            (end_date_est = actual)
+  --   * no end_date, still in feed     -> open (NULL)          (still_live)
+  --   * no end_date, dropped from feed -> feed drop-out date   (feed_dropout)
+  --                                       last GA4 interaction where feed date
+  --                                       is missing (~0.3%)   (last_event)
+  --   * no end_date, no signal at all  -> closed at start_date (edge; ~0 rows today)
   --
   -- Board (on_jgp / on_lg) — the feed `frontends` list is authoritative; GA4
   -- `sites` (traffic) is the fallback so a live vacancy with no clicks yet still
@@ -291,11 +342,8 @@ vac_effective AS (
     v.entity_id_str,
     DATE(v.start_date) AS start_d,
     CASE
-      WHEN v.end_date IS NOT NULL THEN DATE(v.end_date)
-      WHEN v.is_live THEN NULL
-      WHEN v.last_event_date IS NULL THEN DATE(v.start_date)
-      WHEN DATE(v.last_event_date) > DATE_SUB(CURRENT_DATE(), INTERVAL 3 DAY) THEN NULL
-      ELSE DATE(v.last_event_date)
+      WHEN v.is_live THEN v.end_date_est                       -- open (NULL) unless a real end_date
+      ELSE COALESCE(v.end_date_est, DATE(v.start_date))        -- dropped: estimate, floored at start
     END AS end_d,
     COALESCE(f.frontends LIKE '%jobsgopublic%' OR v.sites LIKE '%Jobs Go Public%', FALSE) AS on_jgp,
     COALESCE(f.frontends LIKE '%lgjobs%'       OR v.sites LIKE '%LG Jobs%',        FALSE) AS on_lg

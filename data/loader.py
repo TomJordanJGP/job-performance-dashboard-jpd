@@ -131,8 +131,17 @@ def load_all_data(days_back=None, sample_size=None):
             vacancy_status,
             is_live"""
 
+        # Estimated close date (added 2026-07-08). end_date_est fills the ~36% of
+        # closed vacancies with no explicit end_date from the feed drop-out date
+        # (last_seen); end_date_source records the provenance (actual / still_live /
+        # feed_dropout / last_event). Own tier so the app degrades gracefully in the
+        # window between deploying this code and the refresh that adds the columns.
+        estimate_fields = """,
+            end_date_est,
+            end_date_source"""
+
         vacancy_query = f"""
-        SELECT {core_fields}{salary_fields}{status_fields}
+        SELECT {core_fields}{salary_fields}{status_fields}{estimate_fields}
         FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}`
         {vacancy_where}
         {limit_clause}
@@ -180,8 +189,9 @@ def load_all_data(days_back=None, sample_size=None):
             vacancy_job.result()
         except (NotFound, BadRequest):
             try:
+                # Drop the estimate tier (table not rebuilt with it yet), keep status.
                 vacancy_query = f"""
-                SELECT {core_fields}{salary_fields}
+                SELECT {core_fields}{salary_fields}{status_fields}
                 FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}`
                 {vacancy_where}
                 {limit_clause}
@@ -189,14 +199,24 @@ def load_all_data(days_back=None, sample_size=None):
                 vacancy_job = client.query(vacancy_query)
                 vacancy_job.result()
             except (NotFound, BadRequest):
-                vacancy_query = f"""
-                SELECT {core_fields}
-                FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}`
-                {vacancy_where}
-                {limit_clause}
-                """
-                vacancy_job = client.query(vacancy_query)
-                vacancy_job.result()
+                try:
+                    vacancy_query = f"""
+                    SELECT {core_fields}{salary_fields}
+                    FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}`
+                    {vacancy_where}
+                    {limit_clause}
+                    """
+                    vacancy_job = client.query(vacancy_query)
+                    vacancy_job.result()
+                except (NotFound, BadRequest):
+                    vacancy_query = f"""
+                    SELECT {core_fields}
+                    FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}`
+                    {vacancy_where}
+                    {limit_clause}
+                    """
+                    vacancy_job = client.query(vacancy_query)
+                    vacancy_job.result()
 
         # Try enhanced daily query; fall back to basic if table not yet updated
         try:
