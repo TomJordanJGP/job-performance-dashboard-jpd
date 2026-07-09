@@ -189,11 +189,24 @@ LEFT JOIN `site-monitoring-421401.JPD.t04_importers` imp
 LEFT JOIN feed_ls_by_entity be ON be.entity_id_str = a.entity_id
 )
 SELECT
-  vac.*,
-  -- end_date_est: the close date shown on the dashboard. Real end_date wins; a
-  -- still-live vacancy with no end_date stays open (NULL); otherwise it has dropped
-  -- out of the feed, so estimate from the drop-out date (feed last_seen), falling
-  -- back to the last GA4 interaction only where the feed date is missing (~0.3%).
+  vac.* EXCEPT (end_date),
+  -- end_date is now the BEST-AVAILABLE close date, not the raw feed value: real
+  -- end_date wins; a still-live vacancy with no end_date stays open (NULL);
+  -- otherwise the vacancy dropped out, so fill from the feed drop-out date
+  -- (last_seen), then the last GA4 interaction (~0.3%). Kept as TIMESTAMP (the
+  -- original column type) so EVERY dashboard version renders it with no code
+  -- change — the value lives in the field the app already reads. The untouched
+  -- feed value is preserved as end_date_actual for provenance / strict analysis.
+  vac.end_date AS end_date_actual,
+  CASE
+    WHEN vac.end_date IS NOT NULL        THEN vac.end_date
+    WHEN vac.is_live                     THEN NULL
+    WHEN vac.feed_last_seen IS NOT NULL  THEN TIMESTAMP(vac.feed_last_seen)
+    WHEN vac.last_event_date IS NOT NULL THEN TIMESTAMP(vac.last_event_date)
+    ELSE NULL
+  END AS end_date,
+  -- end_date_est: DATE mirror of the resolved close date (kept for the newer view
+  -- code / any consumer that prefers a DATE); identical rule to end_date above.
   CASE
     WHEN vac.end_date IS NOT NULL        THEN DATE(vac.end_date)
     WHEN vac.is_live                     THEN NULL
@@ -201,7 +214,7 @@ SELECT
     WHEN vac.last_event_date IS NOT NULL THEN vac.last_event_date
     ELSE NULL
   END AS end_date_est,
-  -- provenance for the value above, so the UI can distinguish estimates
+  -- provenance for the resolved close date, so the UI can distinguish estimates
   CASE
     WHEN vac.end_date IS NOT NULL        THEN 'actual'
     WHEN vac.is_live                     THEN 'still_live'
