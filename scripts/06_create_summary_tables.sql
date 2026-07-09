@@ -181,7 +181,26 @@ SELECT
   a.salary_unit,
   a.sites,
   -- feed drop-out date: this entity's last appearance in any feed
-  DATE(be.ls) AS feed_last_seen
+  DATE(be.ls) AS feed_last_seen,
+  -- Resolved close-date estimate for a dropped vacancy = the LATER of the feed
+  -- drop-out date (last_seen) and the last GA4 interaction (last_event_date):
+  -- "the last date we have ANY evidence the vacancy was alive". GA4
+  -- job_visit/job_apply_start are human page interactions (bots don't fire GA4
+  -- JS events), so a click after the feed dropped the job is real evidence it was
+  -- still live. Just as important: backfilled/already-expired jobs are seen in a
+  -- SINGLE feed poll, so first_seen == last_seen == ingest ≈ start_date — the feed
+  -- date alone would make close == start. GREATEST fixes both cases.
+  CASE
+    WHEN DATE(be.ls) IS NULL        THEN a.last_event_date
+    WHEN a.last_event_date IS NULL  THEN DATE(be.ls)
+    ELSE GREATEST(DATE(be.ls), a.last_event_date)
+  END AS est_close,
+  CASE
+    WHEN DATE(be.ls) IS NULL              THEN 'last_event'
+    WHEN a.last_event_date IS NULL        THEN 'feed_dropout'
+    WHEN a.last_event_date >= DATE(be.ls) THEN 'last_event'
+    ELSE 'feed_dropout'
+  END AS est_src
 FROM agg a
 LEFT JOIN regions r USING (entity_id)
 LEFT JOIN `site-monitoring-421401.JPD.t04_importers` imp
@@ -189,38 +208,38 @@ LEFT JOIN `site-monitoring-421401.JPD.t04_importers` imp
 LEFT JOIN feed_ls_by_entity be ON be.entity_id_str = a.entity_id
 )
 SELECT
-  vac.* EXCEPT (end_date),
+  vac.* EXCEPT (end_date, est_close, est_src),
   -- end_date is now the BEST-AVAILABLE close date, not the raw feed value: real
   -- end_date wins; a still-live vacancy with no end_date stays open (NULL);
-  -- otherwise the vacancy dropped out, so fill from the feed drop-out date
-  -- (last_seen), then the last GA4 interaction (~0.3%). Kept as TIMESTAMP (the
+  -- otherwise the vacancy dropped out, so fill from est_close (the LATER of feed
+  -- drop-out and last GA4 interaction — see the vac CTE). Kept as TIMESTAMP (the
   -- original column type) so EVERY dashboard version renders it with no code
   -- change — the value lives in the field the app already reads. The untouched
   -- feed value is preserved as end_date_actual for provenance / strict analysis.
   vac.end_date AS end_date_actual,
+  -- Estimate is floored at start_date so a close date can NEVER precede the start
+  -- (estimates land at midnight, start_date carries a time, so a same-day estimate
+  -- would otherwise read a few hours before start). Floors to exactly start_date in
+  -- that case (0 days), never negative.
   CASE
-    WHEN vac.end_date IS NOT NULL        THEN vac.end_date
-    WHEN vac.is_live                     THEN NULL
-    WHEN vac.feed_last_seen IS NOT NULL  THEN TIMESTAMP(vac.feed_last_seen)
-    WHEN vac.last_event_date IS NOT NULL THEN TIMESTAMP(vac.last_event_date)
-    ELSE NULL
+    WHEN vac.end_date IS NOT NULL   THEN vac.end_date
+    WHEN vac.is_live               THEN NULL
+    WHEN vac.start_date IS NOT NULL THEN GREATEST(TIMESTAMP(vac.est_close), vac.start_date)
+    ELSE TIMESTAMP(vac.est_close)
   END AS end_date,
   -- end_date_est: DATE mirror of the resolved close date (kept for the newer view
   -- code / any consumer that prefers a DATE); identical rule to end_date above.
   CASE
-    WHEN vac.end_date IS NOT NULL        THEN DATE(vac.end_date)
-    WHEN vac.is_live                     THEN NULL
-    WHEN vac.feed_last_seen IS NOT NULL  THEN vac.feed_last_seen
-    WHEN vac.last_event_date IS NOT NULL THEN vac.last_event_date
-    ELSE NULL
+    WHEN vac.end_date IS NOT NULL   THEN DATE(vac.end_date)
+    WHEN vac.is_live               THEN NULL
+    WHEN vac.start_date IS NOT NULL THEN GREATEST(vac.est_close, DATE(vac.start_date))
+    ELSE vac.est_close
   END AS end_date_est,
   -- provenance for the resolved close date, so the UI can distinguish estimates
   CASE
-    WHEN vac.end_date IS NOT NULL        THEN 'actual'
-    WHEN vac.is_live                     THEN 'still_live'
-    WHEN vac.feed_last_seen IS NOT NULL  THEN 'feed_dropout'
-    WHEN vac.last_event_date IS NOT NULL THEN 'last_event'
-    ELSE NULL
+    WHEN vac.end_date IS NOT NULL THEN 'actual'
+    WHEN vac.is_live             THEN 'still_live'
+    ELSE vac.est_src
   END AS end_date_source
 FROM vac;
 
