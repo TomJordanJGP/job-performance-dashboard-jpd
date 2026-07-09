@@ -388,8 +388,12 @@ def render_performance(df, region_df=None):
             'Company': job.get('organization_name', 'Unknown'),
             'Job ID': str(job_id),
             'Status': vac_status,
-            'Start Date': start_date if pd.notna(start_date) else None,
-            'End Date': end_date if pd.notna(end_date) else None,
+            # Normalise both to a plain date so the column is a single Arrow type.
+            # End Date mixes real end_dates (datetime) with estimates (date); an
+            # object column holding both fails Arrow serialization and Streamlit
+            # renders it blank. Uniform date + None serializes cleanly.
+            'Start Date': _to_date(start_date) if pd.notna(start_date) else None,
+            'End Date': _to_date(end_date) if end_date is not None else None,
             'Days Active': int(days_active) if days_active is not None and days_active > 0 else None,
             'Region': job.get('uk_regions', 'Unknown'),
             'Occupation': occupation,
