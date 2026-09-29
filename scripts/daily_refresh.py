@@ -15,6 +15,8 @@ Order:
     4. Silver: GSC sync     04_sync_gsc_daily.sql       -> t04_gsc_daily
     5. Gold:   enriched     05_build_enriched_vacancies.sql -> t05_enriched_vacancies
     6. Gold:   summaries    06_create_summary_tables.sql    -> t06_summary_*
+Then a freshness check (see FRESHNESS_CHECKS): a source that has stopped updating
+fails the run even when every step succeeded.
 
 Does NOT run, by design:
     - One-off reference loaders 00_load_* (organisations, postcodes, importers,
@@ -32,6 +34,7 @@ import sys
 import time
 import argparse
 import subprocess
+from datetime import date, datetime, timezone
 
 from google.cloud import bigquery
 from google.oauth2.service_account import Credentials
@@ -40,6 +43,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 project_dir = os.path.dirname(script_dir)
 
 BQ_PROJECT = "site-monitoring-421401"
+JPD = f"{BQ_PROJECT}.JPD"
 
 # (label, kind, target). kind 'py' runs as a subprocess; 'sql' runs via the client.
 STEPS = [
@@ -65,6 +69,67 @@ def get_client():
 # feed failed to MERGE). Distinct from any other non-zero code, which is a hard
 # failure that stops the pipeline.
 SOFT_FAIL_EXIT = 2
+
+# Freshness guard. A run can finish green while a source has quietly stopped
+# updating: the upstream GA4 tables froze on 2026-08-26 and nothing flagged it for
+# a month. After the rebuild, each source's newest data is compared with how far
+# behind it normally runs; a source past its limit fails the run, so GitHub emails
+# the workflow owner. Entries: (label, SQL returning DATE `newest`, max age in days).
+FRESHNESS_CHECKS = [
+    # GA4 lands intraday, so its newest day is normally today or yesterday.
+    ("GA4 events",
+     f"SELECT MAX(event_date_dt) AS newest FROM `{JPD}.t04_vacancy_events`", 2),
+    # Google's GSC export runs 2-3 days behind. Checked per site so one site's
+    # export stopping can't hide behind the other's.
+    ("GSC Jobs Go Public",
+     f"SELECT MAX(IF(impressions_jgp > 0, event_date, NULL)) AS newest FROM `{JPD}.t04_gsc_daily`", 5),
+    ("GSC LG Jobs",
+     f"SELECT MAX(IF(impressions_lg > 0, event_date, NULL)) AS newest FROM `{JPD}.t04_gsc_daily`", 5),
+]
+
+# The GA4 stall is known and with its owner, so until this date it only warns: a
+# known problem shouldn't turn every run red and bury new failures. From this date
+# a still-stale GA4 source fails the run like any other.
+WARN_ONLY_UNTIL = {"GA4 events": date(2026, 10, 13)}
+
+
+def check_freshness(client):
+    """Print each source's freshness and return the labels that fail the run."""
+    today = datetime.now(timezone.utc).date()
+    results = []  # (label, detail, is_fresh)
+
+    # Every feed in the latest ingest must be 'ok'. The Bronze step only logs
+    # 'empty' and 'stale' feeds, so without this they'd pass silently.
+    feeds = list(client.query(
+        f"SELECT feed_name, status FROM `{JPD}.t00_feed_runs` "
+        f"WHERE run_ts = (SELECT MAX(run_ts) FROM `{JPD}.t00_feed_runs`)").result())
+    bad = [f"{r.feed_name}={r.status}" for r in feeds if r.status != "ok"]
+    detail = f"{len(feeds) - len(bad)}/{len(feeds)} ok" + (f" ({', '.join(bad)})" if bad else "")
+    results.append(("Feeds (latest ingest)", detail, bool(feeds) and not bad))
+
+    for label, sql, max_age in FRESHNESS_CHECKS:
+        newest = list(client.query(sql).result())[0].newest
+        if newest is None:
+            results.append((label, "no data", False))
+        else:
+            age = (today - newest).days
+            results.append((label, f"newest {newest}, {age}d old (limit {max_age}d)", age <= max_age))
+
+    failing = []
+    for label, detail, fresh in results:
+        if fresh:
+            print(f"  {label:22s} {detail}")
+            continue
+        warn_until = WARN_ONLY_UNTIL.get(label)
+        warn_only = warn_until is not None and today < warn_until
+        print(f"  {label:22s} {detail}  <-- STALE"
+              + (f" (warning only until {warn_until})" if warn_only else ""))
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            # Annotation, so it shows on the run's summary page, not just in the log.
+            print(f"::{'warning' if warn_only else 'error'}::{label} is stale: {detail}")
+        if not warn_only:
+            failing.append(label)
+    return failing
 
 
 def run_sql(client, filename, dry_run):
@@ -134,11 +199,20 @@ def main():
             soft_failures.append(label)
         print(f"  {note}  [{time.time() - started:.0f}s]")
 
+    print("\nFreshness check")
+    stale = check_freshness(client)
+
     print("\n" + "=" * 64)
     print(f"{mode} complete in {time.time() - overall:.0f}s")
     if soft_failures:
         print(f"FLAGGED: {len(soft_failures)} step(s) completed with errors: "
               f"{', '.join(soft_failures)}")
+    if stale:
+        print(f"STALE: {len(stale)} source(s) past their freshness limit: {', '.join(stale)}")
+    if soft_failures or stale:
+        if args.dry_run:
+            print("A live run would be marked failed.")
+            return
         print("Downstream tables were still rebuilt; exiting non-zero so the run is marked failed.")
         sys.exit(1)
 
