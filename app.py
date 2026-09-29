@@ -18,7 +18,7 @@ inject_css()
 
 # Import modules
 from theme.components import sidebar_logo, main_logo, sidebar_section_header
-from data.loader import load_all_data, get_data_loaded_at
+from data.loader import load_all_data, get_data_updated_at, stale_data_warning
 from data.processing import (
     prepare_enriched_data,
     apply_importer_mapping,
@@ -90,7 +90,9 @@ def main():
             )
 
         # Footer
-        st.caption(f"Last refreshed: {get_data_loaded_at().strftime('%Y-%m-%d %H:%M')}")
+        updated_at = get_data_updated_at()
+        st.caption(f"Data updated: {updated_at:%Y-%m-%d %H:%M} UTC" if updated_at
+                   else "Data updated: unknown")
         st.caption(f"Total vacancies: {len(df):,}")
         if st.button("Refresh Data", use_container_width=True):
             st.cache_data.clear()
@@ -99,6 +101,9 @@ def main():
     # === MAIN CONTENT ===
     # Logo above tabs
     st.markdown(main_logo(), unsafe_allow_html=True)
+    stale_warning = stale_data_warning(get_data_updated_at())
+    if stale_warning:
+        st.warning(stale_warning, icon="⚠️")
 
     # Tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([

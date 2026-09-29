@@ -310,12 +310,39 @@ def load_all_data(days_back=None, sample_size=None):
         st.stop()
 
 
+# The refresh runs every 4 hours; past this the data is visibly stale, while one
+# late or missed run doesn't trip it.
+STALE_AFTER = timedelta(hours=8)
+
+
 @st.cache_data(ttl=14400)
-def get_data_loaded_at():
-    """Wall-clock time the data cache was last populated. Same TTL as
-    load_all_data (and cleared together by the Refresh button), so it reflects
-    the last actual BigQuery fetch — not the current render time."""
-    return datetime.now()
+def get_data_updated_at():
+    """When the pipeline last rebuilt the tables the dashboard reads (the oldest of
+    them, UTC), or None if BigQuery can't say. Same TTL as load_all_data and cleared
+    with it by the Refresh button, so it describes the data on screen.
+
+    Replaces showing the cache-fill time, which kept reading "today" while the
+    scheduled refresh was silently stopped for three weeks (2026-09-07 to 09-29)."""
+    try:
+        client = get_bigquery_client()
+        return min(
+            client.get_table(f"{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{table}").modified
+            for table in (BQ_TABLE_ID, BQ_DAILY_TOTALS_TABLE_ID,
+                          BQ_REGION_SUMMARY_TABLE_ID, BQ_MEDIA_SUMMARY_TABLE_ID))
+    except Exception:
+        return None
+
+
+def stale_data_warning(updated_at, now=None):
+    """Warning text when the data is older than STALE_AFTER, else None."""
+    if updated_at is None:
+        return None
+    age = (now or datetime.now(updated_at.tzinfo)) - updated_at
+    if age < STALE_AFTER:
+        return None
+    age_text = f"{age.days} days" if age.days >= 2 else f"{int(age.total_seconds() // 3600)} hours"
+    return (f"This data was last updated {age_text} ago ({updated_at:%d %b %Y, %H:%M} UTC). "
+            "The scheduled refresh may have stopped, so recent activity is missing.")
 
 
 @st.cache_data(ttl=300)
