@@ -10,7 +10,9 @@ import plotly.express as px
 from data.calculations import calculate_metrics, calculate_quartile_metrics, KPI_TOOLTIPS
 from data.filters import apply_filters_to_data, apply_filters_to_region_data
 from data.regions import get_country_for_region, COUNTRY_REGIONS
-from theme.components import kpi_card, page_header, filter_tags, section_header, branded_divider
+from theme.components import (
+    kpi_card, impression_kpi_cards, page_header, filter_tags, section_header, branded_divider,
+)
 from theme.colors import JGP_COLORS, JGP_PLOTLY_TEMPLATE, JGP_HEATMAP_COLORSCALE
 
 
@@ -43,7 +45,8 @@ def render_dashboard(df, daily_totals=None, region_df=None):
     metrics = calculate_metrics(filtered_df)
     quartiles = calculate_quartile_metrics(filtered_df)
 
-    # KPI Cards - 6 cards: Vacancies, Clicks, Applies, Apply Rate, Avg Clicks/Vac, Avg Applies/Vac
+    # KPI Cards: Vacancies, Clicks, Applies / Apply Rate, Avg Clicks/Vac, Avg Applies/Vac
+    # / Impressions, Click-Through Rate, Avg Impressions/Vac (once t06 carries them)
     col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown(kpi_card(
@@ -107,6 +110,11 @@ def render_dashboard(df, daily_totals=None, region_df=None):
             } if quartiles else None,
             tooltip=KPI_TOOLTIPS['Avg Applies / Vacancy'],
         ), unsafe_allow_html=True)
+
+    if metrics['has_impressions']:
+        for col, card in zip(st.columns(3), impression_kpi_cards(metrics, quartiles, KPI_TOOLTIPS)):
+            with col:
+                st.markdown(card, unsafe_allow_html=True)
 
     st.markdown(branded_divider(), unsafe_allow_html=True)
 
@@ -173,6 +181,61 @@ def render_dashboard(df, daily_totals=None, region_df=None):
             yaxis_title=None,
         )
         st.plotly_chart(fig, width='stretch')
+
+    # === IMPRESSIONS OVER TIME ===
+    impression_cols = ['onsite_impressions', 'google_job_impressions']
+    if (daily_totals is not None and len(daily_totals) > 0
+            and all(c in daily_totals.columns for c in impression_cols)):
+        st.markdown(branded_divider(), unsafe_allow_html=True)
+        st.markdown(section_header("Impressions Over Time", "eye"), unsafe_allow_html=True)
+        caption = ("On-site = listed in Jobs Go Public / LG Jobs search results; Google = the "
+                   "job page shown in Google search. Ends at the latest day both sources "
+                   "have landed (Google runs ~3 days behind).")
+        if has_active_filters:
+            caption += " Global site totals (not affected by filters)."
+        st.caption(caption)
+
+        impr_granularity = st.selectbox(
+            "View by", ["Daily", "Weekly", "Monthly"], key='impressions_trend_granularity'
+        )
+
+        impr_data = daily_totals[['event_date'] + impression_cols].copy()
+        impr_data['event_date'] = pd.to_datetime(impr_data['event_date'])
+        # Stop at the latest day both sources have data, so the lag doesn't read
+        # as a collapse in the final days.
+        last_days = [impr_data.loc[impr_data[c] > 0, 'event_date'].max() for c in impression_cols]
+        if not any(pd.isna(d) for d in last_days):
+            impr_data = impr_data[impr_data['event_date'] <= min(last_days)]
+        impr_data = impr_data.sort_values('event_date')
+
+        if impr_granularity in ('Weekly', 'Monthly'):
+            freq = 'W' if impr_granularity == 'Weekly' else 'M'
+            impr_data['event_date'] = impr_data['event_date'].dt.to_period(freq).dt.start_time
+            impr_data = impr_data.groupby('event_date', as_index=False)[impression_cols].sum()
+        impr_data['total'] = impr_data[impression_cols].sum(axis=1)
+
+        fig_impr = go.Figure()
+        fig_impr.add_trace(go.Bar(
+            x=impr_data['event_date'], y=impr_data['onsite_impressions'],
+            name='On-site search', marker_color=JGP_COLORS['primary'],
+        ))
+        fig_impr.add_trace(go.Bar(
+            x=impr_data['event_date'], y=impr_data['google_job_impressions'],
+            name='Google search', marker_color=JGP_COLORS['deep_green'],
+        ))
+        fig_impr.add_trace(go.Scatter(
+            x=impr_data['event_date'], y=impr_data['total'],
+            name='Total', line=dict(color=JGP_COLORS['blue'], width=3), mode='lines',
+        ))
+        fig_impr.update_layout(
+            **JGP_PLOTLY_TEMPLATE['layout'],
+            height=450,
+            barmode='stack',
+            hovermode='x unified',
+            xaxis_title=None,
+            yaxis_title='Impressions',
+        )
+        st.plotly_chart(fig_impr, width='stretch')
 
     # === VACANCY TREND BY SITE ===
     if daily_totals is not None and len(daily_totals) > 0:

@@ -82,6 +82,54 @@ def kpi_card(label, value, delta=None, delta_direction="neutral", quartiles=None
     )
 
 
+def compact_number(n):
+    """Short form for big counts in helper lines: 57.6M, 812k, 950."""
+    n = float(n)
+    if abs(n) >= 1e6:
+        return f"{n / 1e6:.1f}M"
+    if abs(n) >= 1e3:
+        return f"{n / 1e3:.0f}k"
+    return f"{int(round(n))}"
+
+
+def impression_kpi_cards(metrics, quartiles, tooltips):
+    """The three impressions tiles shared by the Dashboard and Performance tabs.
+
+    Total Impressions carries the on-site / Google and per-site split in its helper
+    line. Bands follow the click bands like every other tile (see
+    calculate_quartile_metrics). Expects metrics['has_impressions'] to be True.
+    """
+    def count(v):
+        return f"{int(round(v)):,}"
+
+    def pct(v):
+        return f"{v:.1f}%"
+
+    def bands(key, fmt):
+        if not quartiles or key not in quartiles['top_25']:
+            return None
+        return {k: fmt(quartiles[k][key]) for k in ('top_25', 'middle_50', 'bottom_25')}
+
+    split = (
+        f"On-site {compact_number(metrics['total_onsite_impressions'])} · "
+        f"Google {compact_number(metrics['total_google_impressions'])}<br>"
+        f"Jobs Go Public {compact_number(metrics['total_impressions_jgp'])} · "
+        f"LG Jobs {compact_number(metrics['total_impressions_lg'])}"
+    )
+    return [
+        # Band totals run to tens of millions, so short form keeps them in their cells.
+        kpi_card("Total Impressions", count(metrics['total_impressions']),
+                 quartiles=bands('total_impressions', compact_number), helper=split,
+                 tooltip=tooltips['Total Impressions']),
+        kpi_card("Click-Through Rate", pct(metrics['click_through_rate']),
+                 quartiles=bands('click_through_rate', pct),
+                 tooltip=tooltips['Click-Through Rate']),
+        kpi_card("Avg Impressions / Vacancy", count(metrics['mean_impressions_per_vacancy']),
+                 quartiles=bands('impressions_per_vacancy', count),
+                 tooltip=tooltips['Avg Impressions / Vacancy']),
+    ]
+
+
 def page_header(title, subtitle=None):
     """Build a branded page header as HTML string."""
     subtitle_html = f'<p class="subtitle">{subtitle}</p>' if subtitle else ""

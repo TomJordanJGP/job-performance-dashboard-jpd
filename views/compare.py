@@ -68,6 +68,13 @@ def render_compare(df):
         ("Clicks/Vacancy", metrics_left['clicks_per_vacancy'], metrics_right['clicks_per_vacancy']),
         ("Applies/Vacancy", metrics_left['applies_per_vacancy'], metrics_right['applies_per_vacancy']),
     ]
+    if metrics_left['has_impressions'] and metrics_right['has_impressions']:
+        comparison_rows += [
+            ("Impressions", metrics_left['total_impressions'], metrics_right['total_impressions']),
+            ("Impressions/Vacancy", metrics_left['mean_impressions_per_vacancy'],
+             metrics_right['mean_impressions_per_vacancy']),
+            ("Click-Through %", metrics_left['click_through_rate'], metrics_right['click_through_rate']),
+        ]
 
     table_data = []
     for label, val_a, val_b in comparison_rows:
@@ -76,6 +83,11 @@ def render_compare(df):
             b_str = f"{round(val_b)}%"
             diff = val_b - val_a
             pct_str = f"{round(diff):+}pp"
+        elif label == "Click-Through %":
+            # Typically a few percent, so one decimal place; difference in points.
+            a_str = f"{val_a:.1f}%"
+            b_str = f"{val_b:.1f}%"
+            pct_str = f"{val_b - val_a:+.1f}pp"
         else:
             a_str = _fmt(val_a)
             b_str = _fmt(val_b)
@@ -101,14 +113,7 @@ def render_compare(df):
     # === INDEXED COMPARISON CHART ===
     st.markdown(section_header("Comparison Chart (Side A = 100%)", "bar-chart-line"), unsafe_allow_html=True)
 
-    chart_metrics = [
-        ("Vacancies", metrics_left['num_vacancies'], metrics_right['num_vacancies']),
-        ("Clicks", metrics_left['total_clicks'], metrics_right['total_clicks']),
-        ("Applies", metrics_left['total_applies'], metrics_right['total_applies']),
-        ("Apply/Click %", metrics_left['apply_click_ratio'], metrics_right['apply_click_ratio']),
-        ("Clicks/Vacancy", metrics_left['clicks_per_vacancy'], metrics_right['clicks_per_vacancy']),
-        ("Applies/Vacancy", metrics_left['applies_per_vacancy'], metrics_right['applies_per_vacancy']),
-    ]
+    chart_metrics = comparison_rows
 
     labels = []
     side_a_pct = []

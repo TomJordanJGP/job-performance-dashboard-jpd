@@ -10,7 +10,7 @@ from data.calculations import calculate_metrics, calculate_quartile_metrics, KPI
 from data.filters import apply_filters_to_data, apply_filters_to_region_data
 from data.regions import get_country_for_region, COUNTRY_REGIONS
 from theme.components import (
-    kpi_card, page_header, filter_tags, section_header,
+    kpi_card, impression_kpi_cards, page_header, filter_tags, section_header,
     branded_divider, empty_state,
 )
 
@@ -29,6 +29,41 @@ from theme.colors import JGP_COLORS, JGP_PLOTLY_TEMPLATE, JGP_HEATMAP_COLORSCALE
 def _fmt(val):
     """Format number: whole number with thousands separator."""
     return f"{int(round(val)):,}"
+
+
+def _benchmark_row(dimension, value, m):
+    """One Benchmark Comparison row from calculate_metrics output."""
+    row = {
+        dimension: value,
+        'Vacancies': m['num_vacancies'],
+        'Total Clicks': int(round(m['total_clicks'])),
+        'Total Applies': int(round(m['total_applies'])),
+        'Apply/Click %': round(m['apply_click_ratio']),
+        'Avg Clicks/Vac': round(m['mean_clicks_per_vacancy']),
+        'Avg Applies/Vac': round(m['mean_applies_per_vacancy']),
+    }
+    if m['has_impressions']:
+        row.update({
+            'Total Impressions': m['total_impressions'],
+            'Avg Impr/Vac': round(m['mean_impressions_per_vacancy']),
+            'CTR %': round(m['click_through_rate'], 1),
+        })
+    return row
+
+
+def _heatmap_row(occupation, region, m):
+    """One Occupation x Region heatmap cell from calculate_metrics output."""
+    row = {
+        'Occupation': occupation,
+        'Region': region,
+        'Clicks/Vacancy': round(m['clicks_per_vacancy']),
+        'Applies/Vacancy': round(m['applies_per_vacancy']),
+        'Apply/Click %': round(m['apply_click_ratio']),
+    }
+    if m['has_impressions']:
+        row['Impressions/Vacancy'] = round(m['mean_impressions_per_vacancy'])
+        row['CTR %'] = round(m['click_through_rate'], 1)
+    return row
 
 
 def render_performance(df, region_df=None):
@@ -120,6 +155,11 @@ def render_performance(df, region_df=None):
             tooltip=KPI_TOOLTIPS['Avg Applies / Vacancy'],
         ), unsafe_allow_html=True)
 
+    if metrics['has_impressions']:
+        for col, card in zip(st.columns(3), impression_kpi_cards(metrics, quartiles, KPI_TOOLTIPS)):
+            with col:
+                st.markdown(card, unsafe_allow_html=True)
+
     st.markdown(branded_divider(), unsafe_allow_html=True)
 
     # === BENCHMARK TABLE ===
@@ -148,15 +188,7 @@ def render_performance(df, region_df=None):
             for value in sorted(filtered_region['uk_region'].dropna().unique()):
                 subset = filtered_region[filtered_region['uk_region'] == value]
                 m = calculate_metrics(subset)
-                benchmark_data.append({
-                    dimension: value,
-                    'Vacancies': m['num_vacancies'],
-                    'Total Clicks': int(round(m['total_clicks'])),
-                    'Total Applies': int(round(m['total_applies'])),
-                    'Apply/Click %': round(m['apply_click_ratio']),
-                    'Avg Clicks/Vac': round(m['mean_clicks_per_vacancy']),
-                    'Avg Applies/Vac': round(m['mean_applies_per_vacancy']),
-                })
+                benchmark_data.append(_benchmark_row(dimension, value, m))
         elif dimension == 'Region':
             # Fallback: pipe-split from vacancy summary
             all_values = set()
@@ -171,28 +203,12 @@ def render_performance(df, region_df=None):
                 )
                 subset = filtered_df[mask]
                 m = calculate_metrics(subset)
-                benchmark_data.append({
-                    dimension: value,
-                    'Vacancies': m['num_vacancies'],
-                    'Total Clicks': int(round(m['total_clicks'])),
-                    'Total Applies': int(round(m['total_applies'])),
-                    'Apply/Click %': round(m['apply_click_ratio']),
-                    'Avg Clicks/Vac': round(m['mean_clicks_per_vacancy']),
-                    'Avg Applies/Vac': round(m['mean_applies_per_vacancy']),
-                })
+                benchmark_data.append(_benchmark_row(dimension, value, m))
         else:
             for value in filtered_df[col_name].unique():
                 subset = filtered_df[filtered_df[col_name] == value]
                 m = calculate_metrics(subset)
-                benchmark_data.append({
-                    dimension: value,
-                    'Vacancies': m['num_vacancies'],
-                    'Total Clicks': int(round(m['total_clicks'])),
-                    'Total Applies': int(round(m['total_applies'])),
-                    'Apply/Click %': round(m['apply_click_ratio']),
-                    'Avg Clicks/Vac': round(m['mean_clicks_per_vacancy']),
-                    'Avg Applies/Vac': round(m['mean_applies_per_vacancy']),
-                })
+                benchmark_data.append(_benchmark_row(dimension, value, m))
 
         if benchmark_data:
             benchmark_df = pd.DataFrame(benchmark_data).sort_values(dimension, ascending=True)
@@ -207,13 +223,16 @@ def render_performance(df, region_df=None):
                     'Apply/Click %': st.column_config.NumberColumn(format="%d%%"),
                     'Avg Clicks/Vac': st.column_config.NumberColumn(format="%,d"),
                     'Avg Applies/Vac': st.column_config.NumberColumn(format="%,d"),
+                    'Total Impressions': st.column_config.NumberColumn(format="%,d"),
+                    'Avg Impr/Vac': st.column_config.NumberColumn(format="%,d"),
+                    'CTR %': st.column_config.NumberColumn(format="%.1f%%"),
                 },
             )
 
             if dimension == 'Region':
                 st.caption(
-                    "Clicks/applies are counted in **every** region a vacancy spans "
-                    "(GA4 can't attribute traffic to one location), so a multi-region "
+                    "Clicks, applies and impressions are counted in **every** region a "
+                    "vacancy spans (GA4 can't attribute traffic to one location), so a multi-region "
                     "posting's full total is repeated per region — the Total columns "
                     "sum to more than the site-wide total. Per-vacancy averages are unaffected."
                 )
@@ -248,14 +267,7 @@ def render_performance(df, region_df=None):
                 for occ in reg_subset['occupation'].unique():
                     subset = reg_subset[reg_subset['occupation'] == occ]
                     if len(subset) > 0:
-                        m = calculate_metrics(subset)
-                        heatmap_data.append({
-                            'Occupation': occ,
-                            'Region': region,
-                            'Clicks/Vacancy': round(m['clicks_per_vacancy']),
-                            'Applies/Vacancy': round(m['applies_per_vacancy']),
-                            'Apply/Click %': round(m['apply_click_ratio']),
-                        })
+                        heatmap_data.append(_heatmap_row(occ, region, calculate_metrics(subset)))
         else:
             # Fallback: pipe-split from vacancy summary
             all_regions = set()
@@ -272,21 +284,15 @@ def render_performance(df, region_df=None):
                 for occ in filtered_df['occupation'].unique():
                     subset = filtered_df[reg_mask & (filtered_df['occupation'] == occ)]
                     if len(subset) > 0:
-                        m = calculate_metrics(subset)
-                        heatmap_data.append({
-                            'Occupation': occ,
-                            'Region': region,
-                            'Clicks/Vacancy': round(m['clicks_per_vacancy']),
-                            'Applies/Vacancy': round(m['applies_per_vacancy']),
-                            'Apply/Click %': round(m['apply_click_ratio']),
-                        })
+                        heatmap_data.append(_heatmap_row(occ, region, calculate_metrics(subset)))
 
         if heatmap_data:
             heatmap_df = pd.DataFrame(heatmap_data)
 
             heatmap_metric = st.selectbox(
                 "Select metric for heatmap:",
-                ['Clicks/Vacancy', 'Applies/Vacancy', 'Apply/Click %'],
+                [c for c in ['Clicks/Vacancy', 'Applies/Vacancy', 'Apply/Click %',
+                             'Impressions/Vacancy', 'CTR %'] if c in heatmap_df.columns],
                 key='perf_heatmap_metric'
             )
 
@@ -335,6 +341,7 @@ def render_performance(df, region_df=None):
                     'applies': round(occ_subset['applies'].sum() / n),
                 }
 
+    has_impressions = 'impressions' in filtered_df.columns
     vacancy_data = []
     for _, job in filtered_df.iterrows():
         job_id = job[job_col]
@@ -345,6 +352,17 @@ def render_performance(df, region_df=None):
         clicks = int(_c) if pd.notna(_c) else 0
         applies = int(_a) if pd.notna(_a) else 0
         ratio = round((applies / clicks * 100)) if clicks > 0 else 0
+        impressions = {}
+        if has_impressions:
+            impr, onsite, google = (int(v) if pd.notna(v) else 0 for v in
+                                    (job.get('impressions'), job.get('onsite_impressions'),
+                                     job.get('google_impressions')))
+            impressions = {
+                'Impressions': impr,
+                'On-site Impr.': onsite,
+                'Google Impr.': google,
+                'CTR %': round(clicks / impr * 100, 1) if impr > 0 else None,
+            }
 
         # vacancy_status (Published/Unpublished, from is_live) replaces the frozen
         # workflow_state; fall back to workflow_state if the column isn't present
@@ -402,6 +420,7 @@ def render_performance(df, region_df=None):
             'Clicks': clicks,
             'Applies': applies,
             'Ratio %': ratio if clicks > 0 else None,
+            **impressions,
             'Clicks/Day': round(clicks / days_active) if days_active and days_active > 0 else None,
             'Applies/Day': round(applies / days_active) if days_active and days_active > 0 else None,
             'Avg Clicks/Vac (Occ)': occ_clicks_avg,
@@ -426,6 +445,10 @@ def render_performance(df, region_df=None):
             'Clicks': st.column_config.NumberColumn(format="%,d"),
             'Applies': st.column_config.NumberColumn(format="%,d"),
             'Ratio %': st.column_config.NumberColumn(format="%d%%"),
+            'Impressions': st.column_config.NumberColumn(format="%,d"),
+            'On-site Impr.': st.column_config.NumberColumn(format="%,d"),
+            'Google Impr.': st.column_config.NumberColumn(format="%,d"),
+            'CTR %': st.column_config.NumberColumn(format="%.1f%%"),
             'Clicks/Day': st.column_config.NumberColumn(format="%,d"),
             'Applies/Day': st.column_config.NumberColumn(format="%,d"),
             'Avg Clicks/Vac (Occ)': st.column_config.NumberColumn(format="%,d"),

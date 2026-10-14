@@ -140,17 +140,26 @@ def load_all_data(days_back=None, sample_size=None):
             end_date_est,
             end_date_source"""
 
-        vacancy_query = f"""
-        SELECT {core_fields}{salary_fields}{status_fields}{estimate_fields}
-        FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}`
-        {vacancy_where}
-        {limit_clause}
-        """
+        # Impressions (added 2026-10-14): times the vacancy was shown, lifetime like
+        # clicks. On-site = listed in JGP / LG Jobs search results; google = its job
+        # page shown in Google search (scripts/04_sync_vacancy_impressions.sql).
+        impression_fields = """,
+            impressions,
+            onsite_impressions,
+            google_impressions,
+            impressions_jgp,
+            impressions_lg"""
 
-        # Enhanced daily query with GSC + site-split columns
-        daily_query_full = f"""
-        SELECT
+        # Daily totals. Note `impressions*` here = Google impressions of every page on
+        # the site (Search Console); onsite_* / google_job_* = vacancy impressions.
+        daily_core = """
             event_date,
+            clicks,
+            applies,
+            active_vacancies,
+            active_jgp,
+            active_lg"""
+        daily_gsc_fields = """,
             impressions, impressions_jgp, impressions_lg,
             gb_impressions_jgp, gb_impressions_lg,
             gsc_clicks, gsc_clicks_jgp, gsc_clicks_lg,
@@ -158,74 +167,39 @@ def load_all_data(days_back=None, sample_size=None):
             avg_position_jgp, avg_position_lg,
             job_listing_rich_jgp, job_listing_rich_lg,
             job_detail_rich_jgp, job_detail_rich_lg,
-            clicks, clicks_jgp, clicks_lg,
-            applies, applies_jgp, applies_lg,
-            active_vacancies, active_jgp, active_lg
-        FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_DAILY_TOTALS_TABLE_ID}`
-        {daily_where}
-        ORDER BY event_date
-        """
+            clicks_jgp, clicks_lg,
+            applies_jgp, applies_lg"""
+        daily_impression_fields = """,
+            onsite_impressions, onsite_impressions_jgp, onsite_impressions_lg,
+            google_job_impressions, google_job_impressions_jgp, google_job_impressions_lg"""
 
-        # Fallback daily query (pre-GSC schema)
-        daily_query_basic = f"""
-        SELECT
-            event_date,
-            clicks,
-            applies,
-            active_vacancies,
-            active_jgp,
-            active_lg
-        FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_DAILY_TOTALS_TABLE_ID}`
-        {daily_where}
-        ORDER BY event_date
-        """
-
-        # Try salary + status fields; fall back progressively if t06 hasn't been
-        # rebuilt with them yet (drop status first, then salary, then core-only).
+        # Column tiers are added to t06 over time, oldest first. If t06 hasn't been
+        # rebuilt with the newest tier yet (between deploying code and the refresh
+        # that adds its columns), drop tiers newest-first until the query works.
         # Narrow catch so transient/auth errors surface instead of silently
         # dropping columns.
-        try:
-            vacancy_job = client.query(vacancy_query)
-            vacancy_job.result()
-        except (NotFound, BadRequest):
-            try:
-                # Drop the estimate tier (table not rebuilt with it yet), keep status.
-                vacancy_query = f"""
-                SELECT {core_fields}{salary_fields}{status_fields}
-                FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}`
-                {vacancy_where}
-                {limit_clause}
-                """
-                vacancy_job = client.query(vacancy_query)
-                vacancy_job.result()
-            except (NotFound, BadRequest):
+        def query_with_fallback(core, tiers, table, where, tail):
+            for n in range(len(tiers), -1, -1):
                 try:
-                    vacancy_query = f"""
-                    SELECT {core_fields}{salary_fields}
-                    FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}`
-                    {vacancy_where}
-                    {limit_clause}
-                    """
-                    vacancy_job = client.query(vacancy_query)
-                    vacancy_job.result()
+                    job = client.query(f"""
+                    SELECT {core}{''.join(tiers[:n])}
+                    FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{table}`
+                    {where}
+                    {tail}
+                    """)
+                    job.result()
+                    return job
                 except (NotFound, BadRequest):
-                    vacancy_query = f"""
-                    SELECT {core_fields}
-                    FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_TABLE_ID}`
-                    {vacancy_where}
-                    {limit_clause}
-                    """
-                    vacancy_job = client.query(vacancy_query)
-                    vacancy_job.result()
+                    if n == 0:
+                        raise
 
-        # Try enhanced daily query; fall back to basic if table not yet updated
-        try:
-            daily_job = client.query(daily_query_full)
-            daily_job.result()
-        except (NotFound, BadRequest):
-            # GSC/site-split columns not in the table yet — fall back to basic.
-            daily_job = client.query(daily_query_basic)
-            daily_job.result()
+        vacancy_job = query_with_fallback(
+            core_fields,
+            [salary_fields, status_fields, estimate_fields, impression_fields],
+            BQ_TABLE_ID, vacancy_where, limit_clause)
+        daily_job = query_with_fallback(
+            daily_core, [daily_gsc_fields, daily_impression_fields],
+            BQ_DAILY_TOTALS_TABLE_ID, daily_where, "ORDER BY event_date")
 
         vacancy_df = vacancy_job.to_dataframe(create_bqstorage_client=False)
         daily_df = daily_job.to_dataframe(create_bqstorage_client=False)
@@ -234,8 +208,7 @@ def load_all_data(days_back=None, sample_size=None):
         # Falls back to None if the table doesn't exist yet
         region_df = None
         try:
-            region_query = f"""
-            SELECT
+            region_core = """
                 entity_id_str,
                 external_id,
                 uk_region,
@@ -263,12 +236,11 @@ def load_all_data(days_back=None, sample_size=None):
                 salary_free_text,
                 salary_exact,
                 salary_unit,
-                sites
-            FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_REGION_SUMMARY_TABLE_ID}`
-            {vacancy_where}
-            """
-            region_job = client.query(region_query)
-            region_job.result()
+                sites"""
+            region_job = query_with_fallback(
+                region_core, [""",
+                impressions"""],
+                BQ_REGION_SUMMARY_TABLE_ID, vacancy_where, "")
             region_df = region_job.to_dataframe(create_bqstorage_client=False)
         except (NotFound, BadRequest):
             pass  # Table/columns not present yet — views fall back to pipe-split

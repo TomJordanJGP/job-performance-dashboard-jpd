@@ -3,7 +3,7 @@
 import numpy as np
 
 
-# Tooltip copy for the six KPI tiles shared by the Dashboard and Performance
+# Tooltip copy for the KPI tiles shared by the Dashboard and Performance
 # tabs. Colocated with the calculations so the explanation and the formula
 # never drift apart. The Low / Mid / Top 25% bands are always defined by
 # clicks across every tile (see calculate_quartile_metrics) — the tooltips
@@ -37,6 +37,23 @@ KPI_TOOLTIPS = {
     'Avg Applies / Vacancy': (
         "Total applies ÷ total vacancies. Bands rank vacancies by clicks "
         "(not applies) and show each band's per-vacancy apply count."
+    ),
+    'Total Impressions': (
+        "Times the vacancies were shown: listed in Jobs Go Public / LG Jobs "
+        "search results (on-site) plus their job page shown in Google search. "
+        "Google impressions of the homepage, listing pages and blog aren't "
+        "counted — they name no vacancy. Bands rank vacancies by clicks and sum "
+        "each band's impressions."
+    ),
+    'Click-Through Rate': (
+        "Clicks ÷ Impressions × 100. Clicks count every visit to the job page, "
+        "including routes that aren't impressions (direct links, job boards, "
+        "email alerts), so treat this as visits per showing. Bands rank "
+        "vacancies by clicks and compute each band's rate."
+    ),
+    'Avg Impressions / Vacancy': (
+        "Total impressions ÷ total vacancies. Bands rank vacancies by clicks "
+        "and show each band's per-vacancy impressions."
     ),
 }
 
@@ -90,6 +107,19 @@ def calculate_metrics(df):
         metrics['clicks_per_vacancy'] = 0
         metrics['applies_per_vacancy'] = 0
 
+    # Impressions are a later column tier (see data/loader.py); absent until t06
+    # carries them, so the views check `has_impressions` before showing tiles.
+    metrics['has_impressions'] = 'impressions' in df.columns
+    if metrics['has_impressions']:
+        for col in ('impressions', 'onsite_impressions', 'google_impressions',
+                    'impressions_jgp', 'impressions_lg'):
+            metrics[f'total_{col}'] = int(df[col].sum()) if col in df.columns else 0
+        n, impr = metrics['num_vacancies'], metrics['total_impressions']
+        metrics['click_through_rate'] = metrics['total_clicks'] / impr * 100 if impr > 0 else 0
+        metrics['mean_impressions_per_vacancy'] = impr / n if n > 0 else 0
+        metrics['median_impressions_per_vacancy'] = (
+            float(np.nanmedian(df['impressions'].values)) if n > 0 else 0)
+
     return metrics
 
 
@@ -103,6 +133,7 @@ def calculate_quartile_metrics(df):
 
     vacancy_clicks = df['clicks']
     vacancy_applies = df['applies']
+    vacancy_impressions = df['impressions'] if 'impressions' in df.columns else None
 
     q1_threshold = vacancy_clicks.quantile(0.25)
     q3_threshold = vacancy_clicks.quantile(0.75)
@@ -136,5 +167,12 @@ def calculate_quartile_metrics(df):
             'clicks_per_vacancy': total_clicks / num_vacancies if num_vacancies > 0 else 0,
             'applies_per_vacancy': total_applies / num_vacancies if num_vacancies > 0 else 0
         }
+        if vacancy_impressions is not None:
+            total_impressions = int(vacancy_impressions[mask].sum())
+            quartiles[name].update({
+                'total_impressions': total_impressions,
+                'click_through_rate': (total_clicks / total_impressions * 100) if total_impressions > 0 else 0,
+                'impressions_per_vacancy': total_impressions / num_vacancies if num_vacancies > 0 else 0,
+            })
 
     return quartiles
