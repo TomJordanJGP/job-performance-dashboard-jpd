@@ -144,6 +144,21 @@ feed_ls_by_entity AS (
   WHERE entity_id IS NOT NULL
   GROUP BY entity_id_str
 ),
+-- Lifetime impressions per vacancy, like clicks (04_sync_vacancy_impressions.sql):
+-- onsite = listed in JGP / LG Jobs search results, google = its job page shown in
+-- Google search. Keyed by entity_id; vacancies only seen in impressions (~1%, no
+-- GA4 event or feed row) aren't in t05 and so count in daily totals only.
+impr AS (
+  SELECT
+    CAST(entity_id AS STRING) AS entity_id,
+    SUM(impressions) AS impressions,
+    SUM(IF(channel = 'onsite', impressions, 0)) AS onsite_impressions,
+    SUM(IF(channel = 'google', impressions, 0)) AS google_impressions,
+    SUM(IF(site = 'Jobs Go Public', impressions, 0)) AS impressions_jgp,
+    SUM(IF(site = 'LG Jobs', impressions, 0)) AS impressions_lg
+  FROM `site-monitoring-421401.JPD.t04_vacancy_impressions`
+  GROUP BY 1
+),
 vac AS (
 SELECT
   a.entity_id AS entity_id_str,
@@ -151,6 +166,11 @@ SELECT
   a.last_event_date,
   a.clicks,
   a.applies,
+  COALESCE(im.impressions, 0)        AS impressions,
+  COALESCE(im.onsite_impressions, 0) AS onsite_impressions,
+  COALESCE(im.google_impressions, 0) AS google_impressions,
+  COALESCE(im.impressions_jgp, 0)    AS impressions_jgp,
+  COALESCE(im.impressions_lg, 0)     AS impressions_lg,
   a.title,
   a.organization_name,
   COALESCE(r.uk_regions, a.primary_uk_region) AS uk_regions,
@@ -206,6 +226,7 @@ LEFT JOIN regions r USING (entity_id)
 LEFT JOIN `site-monitoring-421401.JPD.t04_importers` imp
   ON a.importer_ID = imp.importer_id
 LEFT JOIN feed_ls_by_entity be ON be.entity_id_str = a.entity_id
+LEFT JOIN impr im ON im.entity_id = a.entity_id
 )
 SELECT
   vac.* EXCEPT (end_date, est_close, est_src),
@@ -320,6 +341,21 @@ gsc_site_daily AS (
     sum_position_jgp, sum_position_lg
   FROM `site-monitoring-421401.JPD.t04_gsc_daily`
 ),
+-- Vacancy impressions per day (04_sync_vacancy_impressions.sql). Named onsite_* /
+-- google_job_* because impressions* above already means Google impressions of the
+-- whole site (every page); google_job_* counts job pages only.
+daily_impressions AS (
+  SELECT
+    event_date,
+    SUM(IF(channel = 'onsite', impressions, 0)) AS onsite_impressions,
+    SUM(IF(channel = 'onsite' AND site = 'Jobs Go Public', impressions, 0)) AS onsite_impressions_jgp,
+    SUM(IF(channel = 'onsite' AND site = 'LG Jobs',        impressions, 0)) AS onsite_impressions_lg,
+    SUM(IF(channel = 'google', impressions, 0)) AS google_job_impressions,
+    SUM(IF(channel = 'google' AND site = 'Jobs Go Public', impressions, 0)) AS google_job_impressions_jgp,
+    SUM(IF(channel = 'google' AND site = 'LG Jobs',        impressions, 0)) AS google_job_impressions_lg
+  FROM `site-monitoring-421401.JPD.t04_vacancy_impressions`
+  GROUP BY event_date
+),
 -- GSC URL-level rich-result counts — also from the pre-aggregated t04_gsc_daily.
 gsc_rich_daily AS (
   SELECT event_date,
@@ -427,13 +463,20 @@ SELECT
   COALESCE(de.applies, 0)     AS applies,
   COALESCE(de.applies_jgp, 0) AS applies_jgp,
   COALESCE(de.applies_lg, 0)  AS applies_lg,
+  COALESCE(di.onsite_impressions, 0)         AS onsite_impressions,
+  COALESCE(di.onsite_impressions_jgp, 0)     AS onsite_impressions_jgp,
+  COALESCE(di.onsite_impressions_lg, 0)      AS onsite_impressions_lg,
+  COALESCE(di.google_job_impressions, 0)     AS google_job_impressions,
+  COALESCE(di.google_job_impressions_jgp, 0) AS google_job_impressions_jgp,
+  COALESCE(di.google_job_impressions_lg, 0)  AS google_job_impressions_lg,
   da.active_vacancies,
   da.active_jgp,
   da.active_lg
 FROM daily_active da
 LEFT JOIN daily_events  de ON da.event_date = de.event_date
 LEFT JOIN gsc_site_daily gs ON da.event_date = gs.event_date
-LEFT JOIN gsc_rich_daily gr ON da.event_date = gr.event_date;
+LEFT JOIN gsc_rich_daily gr ON da.event_date = gr.event_date
+LEFT JOIN daily_impressions di ON da.event_date = di.event_date;
 
 
 -- ===========================================================================
