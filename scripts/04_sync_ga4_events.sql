@@ -32,7 +32,14 @@ SELECT
   event_name,
   FORMAT_DATE('%Y%m%d', event_date) AS event_date,
   event_date AS event_date_dt,
-  hour_of_day, entity_id, entity_type, entity_subtype,
+  hour_of_day,
+  -- Since ~2026-08-10 GA4 sends a growing share of events without entity_id (~13% by
+  -- Oct 2026, both sites). On job pages the URL ends in the vacancy id (/job/<slug>-<id>),
+  -- which matched entity_id on every row carrying both (184,218 rows, Sep-Oct 2026), so it
+  -- fills the gap there. Search-page events carry no id and stay NULL.
+  COALESCE(entity_id, SAFE_CAST(
+    REGEXP_EXTRACT(page_location, r'/job/[^/?#]*-(\d+)(?:[/?#]|$)') AS INT64)) AS entity_id,
+  entity_type, entity_subtype,
   organization_name, title, application_type, occupations, regions, employment_types,
   importer_ID, current_user_id, user_role, owner_id, organization_id,
   page_referrer, page_location, upgrades, ats_vacancy_number, ats_account_number,

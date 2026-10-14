@@ -67,7 +67,11 @@ SELECT
   event_name,
   FORMAT_DATE('%Y%m%d', event_date) AS event_date,
   event_date AS event_date_dt,
-  hour_of_day, entity_id, entity_type, entity_subtype,
+  hour_of_day,
+  -- Missing entity_id falls back to the id in the job page URL; see 04_sync_ga4_events.sql.
+  COALESCE(entity_id, SAFE_CAST(
+    REGEXP_EXTRACT(page_location, r'/job/[^/?#]*-(\d+)(?:[/?#]|$)') AS INT64)) AS entity_id,
+  entity_type, entity_subtype,
   organization_name, title, application_type, occupations, regions, employment_types,
   importer_ID, current_user_id, user_role, owner_id, organization_id,
   page_referrer, page_location, upgrades, ats_vacancy_number, ats_account_number,
