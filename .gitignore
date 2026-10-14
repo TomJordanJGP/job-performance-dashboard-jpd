@@ -2,6 +2,10 @@
 service_account.json
 *.json
 !package.json
+# API keys / secrets — local only, NEVER commit (public repo!)
+.ATS_API_KEY.env
+*.env
+.env
 
 # Python
 __pycache__/
