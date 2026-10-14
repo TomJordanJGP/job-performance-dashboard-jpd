@@ -14,15 +14,16 @@ Order:
     3. Silver: GA4 sync     04_sync_ga4_events.sql      -> t04_vacancy_events
     4. Silver: GA4 ids      04_recover_ga4_entity_ids.sql -> t04_vacancy_events (id-less events)
     5. Silver: GSC sync     04_sync_gsc_daily.sql       -> t04_gsc_daily
-    6. Gold:   enriched     05_build_enriched_vacancies.sql -> t05_enriched_vacancies
-    7. Gold:   summaries    06_create_summary_tables.sql    -> t06_summary_*
+    6. Silver: impressions  04_sync_vacancy_impressions.sql -> t04_vacancy_impressions
+    7. Gold:   enriched     05_build_enriched_vacancies.sql -> t05_enriched_vacancies
+    8. Gold:   summaries    06_create_summary_tables.sql    -> t06_summary_*
 Then a freshness check (see FRESHNESS_CHECKS): a source that has stopped updating
 fails the run even when every step succeeded.
 
 Does NOT run, by design:
     - One-off reference loaders 00_load_* (organisations, postcodes, importers,
       selfservice) — re-run manually only when their source data changes.
-    - One-off backfills 04_create_and_backfill_* — the daily syncs (steps 3 and 5)
+    - One-off backfills 04_create_and_backfill_* — the daily syncs (steps 3, 5 and 6)
       keep those tables fresh.
 
 Usage:
@@ -53,6 +54,7 @@ STEPS = [
     ("Silver: GA4 events sync (t04)",      "sql", "04_sync_ga4_events.sql"),
     ("Silver: GA4 id recovery (t04)",      "sql", "04_recover_ga4_entity_ids.sql"),
     ("Silver: GSC daily sync (t04)",       "sql", "04_sync_gsc_daily.sql"),
+    ("Silver: vacancy impressions (t04)",  "sql", "04_sync_vacancy_impressions.sql"),
     ("Gold: t05_enriched_vacancies",       "sql", "05_build_enriched_vacancies.sql"),
     ("Gold: t06_summary_*",                "sql", "06_create_summary_tables.sql"),
 ]
@@ -88,6 +90,14 @@ FRESHNESS_CHECKS = [
      f"SELECT MAX(IF(impressions_jgp > 0, event_date, NULL)) AS newest FROM `{JPD}.t04_gsc_daily`", 5),
     ("GSC LG Jobs",
      f"SELECT MAX(IF(impressions_lg > 0, event_date, NULL)) AS newest FROM `{JPD}.t04_gsc_daily`", 5),
+    # On-site impressions come from the raw GA4 daily export, which lands a day or
+    # two behind. Per site, since each site is its own GA4 property.
+    ("On-site impr. JGP",
+     f"SELECT MAX(event_date) AS newest FROM `{JPD}.t04_vacancy_impressions` "
+     "WHERE channel = 'onsite' AND site = 'Jobs Go Public'", 3),
+    ("On-site impr. LG Jobs",
+     f"SELECT MAX(event_date) AS newest FROM `{JPD}.t04_vacancy_impressions` "
+     "WHERE channel = 'onsite' AND site = 'LG Jobs'", 3),
 ]
 
 # A known, owned staleness can be made warn-only until a date, e.g.
