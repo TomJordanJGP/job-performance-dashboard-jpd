@@ -1,15 +1,15 @@
--- One-off: create JPD.t04_vacancy_events (partitioned + clustered) and backfill all history.
--- Run ONCE. After this, scripts/04_sync_ga4_events.sql handles the daily 5-day window.
+-- One-off: (re)create JPD.t04_vacancy_events (partitioned + clustered) and backfill all history.
+-- After this, scripts/04_sync_ga4_events.sql handles the daily 7-day window.
 --
 -- Why this exists separately from the daily sync:
---   Prod's incremental_sync_combined.sql assumes the destination already has full history.
---   JPD is a fresh dataset — the destination table doesn't exist yet, so we seed it here.
+--   The daily sync assumes the destination already has full history; this seeds it. Re-run
+--   it to rebuild t04 from scratch, e.g. after a source change (last run 2026-10-14, when the
+--   source moved to aggregated_data after the old combined table froze on 2026-08-26).
 --
--- Why partition by a derived DATE column (not the raw STRING event_date):
---   Source carries event_date as STRING 'YYYYMMDD'. To partition we need a true DATE.
---   We add a sibling event_date_dt DATE column derived at ingest. Original STRING column
---   is preserved so downstream SQL (prod's enriched/aggregate scripts) keeps working
---   unchanged when ported.
+-- Why event_date is kept as STRING alongside the DATE event_date_dt:
+--   The source's event_date is a DATE and becomes event_date_dt, the partition column. The
+--   original source stored it as STRING 'YYYYMMDD', and downstream SQL ported from prod still
+--   reads that form, so it's kept as a formatted copy.
 
 CREATE OR REPLACE TABLE `site-monitoring-421401.JPD.t04_vacancy_events`
 (
@@ -51,7 +51,7 @@ CREATE OR REPLACE TABLE `site-monitoring-421401.JPD.t04_vacancy_events`
 PARTITION BY event_date_dt
 CLUSTER BY entity_id, organization_id
 OPTIONS (
-  description = "GA4 vacancy events. Source: jobsgopublic.Datastudio_scheduled_data_combined.Job-performance-detaile_combined. Refresh: daily 5-day delete+insert window via scripts/04_sync_ga4_events.sql. Partition: event_date_dt (derived DATE). Cluster: entity_id, organization_id."
+  description = "GA4 vacancy events. Source: jobsgopublic.aggregated_data.ga4_job_events__jobsgopublic. Refresh: daily 7-day delete+insert window via scripts/04_sync_ga4_events.sql. Partition: event_date_dt (source DATE). Cluster: entity_id, organization_id."
 );
 
 INSERT INTO `site-monitoring-421401.JPD.t04_vacancy_events`
@@ -65,12 +65,16 @@ INSERT INTO `site-monitoring-421401.JPD.t04_vacancy_events`
 )
 SELECT
   event_name,
-  event_date,
-  SAFE.PARSE_DATE('%Y%m%d', event_date) AS event_date_dt,
+  FORMAT_DATE('%Y%m%d', event_date) AS event_date,
+  event_date AS event_date_dt,
   hour_of_day, entity_id, entity_type, entity_subtype,
   organization_name, title, application_type, occupations, regions, employment_types,
   importer_ID, current_user_id, user_role, owner_id, organization_id,
   page_referrer, page_location, upgrades, ats_vacancy_number, ats_account_number,
   salary_currency, salary_low, salary_high, device, operating_system, browser,
-  campaign, medium, source, Events, site
-FROM `jobsgopublic.Datastudio_scheduled_data_combined.Job-performance-detaile_combined`;
+  campaign, medium, source, Events,
+  _source_sitename AS site
+FROM `jobsgopublic.aggregated_data.ga4_job_events__jobsgopublic`
+-- Rows without a date would land in t04's NULL partition, which the daily sync's DELETE
+-- never matches.
+WHERE event_date IS NOT NULL;

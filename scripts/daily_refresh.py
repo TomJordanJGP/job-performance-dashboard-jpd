@@ -34,7 +34,7 @@ import sys
 import time
 import argparse
 import subprocess
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
 from google.cloud import bigquery
 from google.oauth2.service_account import Credentials
@@ -76,9 +76,10 @@ SOFT_FAIL_EXIT = 2
 # behind it normally runs; a source past its limit fails the run, so GitHub emails
 # the workflow owner. Entries: (label, SQL returning DATE `newest`, max age in days).
 FRESHNESS_CHECKS = [
-    # GA4 lands intraday, so its newest day is normally today or yesterday.
+    # The GA4 source is rebuilt once a day at ~06:30 UTC up to D-2, so runs before
+    # then see D-3 as the newest day.
     ("GA4 events",
-     f"SELECT MAX(event_date_dt) AS newest FROM `{JPD}.t04_vacancy_events`", 2),
+     f"SELECT MAX(event_date_dt) AS newest FROM `{JPD}.t04_vacancy_events`", 3),
     # Google's GSC export runs 2-3 days behind. Checked per site so one site's
     # export stopping can't hide behind the other's.
     ("GSC Jobs Go Public",
@@ -87,10 +88,10 @@ FRESHNESS_CHECKS = [
      f"SELECT MAX(IF(impressions_lg > 0, event_date, NULL)) AS newest FROM `{JPD}.t04_gsc_daily`", 5),
 ]
 
-# The GA4 stall is known and with its owner, so until this date it only warns: a
-# known problem shouldn't turn every run red and bury new failures. From this date
-# a still-stale GA4 source fails the run like any other.
-WARN_ONLY_UNTIL = {"GA4 events": date(2026, 10, 13)}
+# A known, owned staleness can be made warn-only until a date, e.g.
+# {"GA4 events": date(2026, 10, 13)}, so it doesn't turn every run red and bury new
+# failures. From that date a still-stale source fails the run like any other.
+WARN_ONLY_UNTIL = {}
 
 
 def check_freshness(client):

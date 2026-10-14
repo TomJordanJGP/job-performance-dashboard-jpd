@@ -1,18 +1,24 @@
--- Daily incremental sync: re-sync last 5 days from source to JPD.t04_vacancy_events.
+-- Daily incremental sync: re-sync last 7 days from source to JPD.t04_vacancy_events.
 -- Delete + re-insert window is idempotent and catches late-arriving rows.
--- Ported verbatim from prod's incremental_sync_combined.sql, with two adjustments:
---   1. Retargeted at JPD.t04_vacancy_events (partitioned, clustered).
---   2. Derives event_date_dt (DATE) from event_date (STRING 'YYYYMMDD') at INSERT time
---      so the partition column is populated for new rows.
+--
+-- Source: jobsgopublic.aggregated_data.ga4_job_events__jobsgopublic (both sites, partitioned
+-- by event_date DATE). It replaced Datastudio_scheduled_data_combined.Job-performance-detaile_combined,
+-- which stopped updating after 2026-08-26; event totals match it exactly on the shared history.
+-- It's rebuilt daily at ~06:30 UTC, rewriting D-5..D-2, so its newest day is D-2. The 7-day
+-- window covers that rewrite with two days' margin for a missed run.
+--
+-- Mapped onto t04's existing schema so downstream SQL is unchanged:
+--   event_date (DATE)  -> event_date_dt, plus event_date as STRING 'YYYYMMDD'
+--   _source_sitename   -> site ('Jobs Go Public' / 'LG Jobs', same values as before)
 --
 -- Prerequisite: scripts/04_create_and_backfill_ga4.sql has been run once to create the table.
 -- Safe to run repeatedly.
 
--- Step 1: Delete last 5 days from destination
+-- Step 1: Delete last 7 days from destination
 DELETE FROM `site-monitoring-421401.JPD.t04_vacancy_events`
-WHERE event_date_dt >= DATE_SUB(CURRENT_DATE(), INTERVAL 5 DAY);
+WHERE event_date_dt >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY);
 
--- Step 2: Re-insert last 5 days (plus any new dates) from source
+-- Step 2: Re-insert last 7 days (plus any new dates) from source
 INSERT INTO `site-monitoring-421401.JPD.t04_vacancy_events`
 (
   event_name, event_date, event_date_dt, hour_of_day, entity_id, entity_type, entity_subtype,
@@ -24,18 +30,17 @@ INSERT INTO `site-monitoring-421401.JPD.t04_vacancy_events`
 )
 SELECT
   event_name,
-  event_date,
-  SAFE.PARSE_DATE('%Y%m%d', event_date) AS event_date_dt,
+  FORMAT_DATE('%Y%m%d', event_date) AS event_date,
+  event_date AS event_date_dt,
   hour_of_day, entity_id, entity_type, entity_subtype,
   organization_name, title, application_type, occupations, regions, employment_types,
   importer_ID, current_user_id, user_role, owner_id, organization_id,
   page_referrer, page_location, upgrades, ats_vacancy_number, ats_account_number,
   salary_currency, salary_low, salary_high, device, operating_system, browser,
-  campaign, medium, source, Events, site
-FROM `jobsgopublic.Datastudio_scheduled_data_combined.Job-performance-detaile_combined` AS src
--- String filter prunes the source on its YYYYMMDD event_date (same 5-day window
--- the DELETE above applies to event_date_dt). The IS NOT NULL guard drops rows
--- whose event_date won't parse: without it they'd insert with event_date_dt=NULL,
--- land in the NULL partition the DELETE never matches, and accumulate forever.
-WHERE src.event_date >= FORMAT_DATE('%Y%m%d', DATE_SUB(CURRENT_DATE(), INTERVAL 5 DAY))
-  AND SAFE.PARSE_DATE('%Y%m%d', src.event_date) IS NOT NULL;
+  campaign, medium, source, Events,
+  _source_sitename AS site
+FROM `jobsgopublic.aggregated_data.ga4_job_events__jobsgopublic` AS src
+-- Same window as the DELETE above; prunes to the source's last 7 partitions. NULL
+-- event_dates fail the comparison, so nothing lands in t04's NULL partition (which
+-- the DELETE never matches).
+WHERE src.event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY);
