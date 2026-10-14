@@ -162,3 +162,6 @@ session_handoff.md
 # Internal docs + Apps Script kept local only — never published to the public repo
 # (DATA_FLOW.md, upstream_flow.md, google-apps-script/ — the last carries a GA4 Sheet ID).
 /internal/
+
+# Local-only working docs (owner name, pre-ATS/impressions snapshot)
+/docs/data_schema.*

@@ -111,7 +111,8 @@ WITH agg AS (
     ANY_VALUE(salary_free_text)  AS salary_free_text,
     ANY_VALUE(salary_exact)      AS salary_exact,
     ANY_VALUE(salary_unit)       AS salary_unit,
-    STRING_AGG(DISTINCT site, ' | ' ORDER BY site) AS sites
+    STRING_AGG(DISTINCT site, ' | ' ORDER BY site) AS sites,
+    ANY_VALUE(jgp_external_vacancy_id) AS jgp_external_vacancy_id
   FROM `site-monitoring-421401.JPD.t05_enriched_vacancies`
   WHERE event_name IN ('job_visit', 'job_apply_start', 'metadata_only')
     AND entity_id IS NOT NULL
@@ -159,6 +160,29 @@ impr AS (
   FROM `site-monitoring-421401.JPD.t04_vacancy_impressions`
   GROUP BY 1
 ),
+-- ATS API aggregates per vacancy (from the Silver t04_ats_* tables), keyed by
+-- jgp_external_vacancy_id. jgp<->entity is ~1:1 (only 2 re-listed jgp_ids span 2
+-- entities — negligible double-count), so a straight LEFT JOIN on the id is safe.
+ats_media AS (
+  SELECT jgp_external_vacancy_id,
+    SUM(list_views)           AS ats_list_views,
+    SUM(advert_views)         AS ats_advert_views,
+    SUM(apply_clicks)         AS ats_apply_clicks,
+    SUM(applications_started) AS ats_applications_started
+  FROM `site-monitoring-421401.JPD.t04_ats_media_source`
+  GROUP BY jgp_external_vacancy_id
+),
+ats_apps AS (
+  SELECT jgp_external_vacancy_id,
+    COUNT(*)                          AS ats_applications,
+    COUNTIF(is_submitted)             AS ats_applications_submitted,
+    COUNTIF(outcome = 'hired')        AS ats_hired,
+    COUNTIF(outcome = 'unsuccessful') AS ats_unsuccessful,
+    COUNTIF(outcome = 'withdrawn')    AS ats_withdrawn,
+    COUNTIF(outcome = 'in_progress')  AS ats_in_progress
+  FROM `site-monitoring-421401.JPD.t04_ats_application`
+  GROUP BY jgp_external_vacancy_id
+),
 vac AS (
 SELECT
   a.entity_id AS entity_id_str,
@@ -193,6 +217,17 @@ SELECT
   CAST(NULL AS STRING) AS contract_type,
   a.employment_type,
   a.external_id,
+  a.jgp_external_vacancy_id,
+  IFNULL(am.ats_list_views, 0)           AS ats_list_views,
+  IFNULL(am.ats_advert_views, 0)         AS ats_advert_views,
+  IFNULL(am.ats_apply_clicks, 0)         AS ats_apply_clicks,
+  IFNULL(am.ats_applications_started, 0) AS ats_applications_started,
+  IFNULL(aa.ats_applications, 0)           AS ats_applications,
+  IFNULL(aa.ats_applications_submitted, 0) AS ats_applications_submitted,
+  IFNULL(aa.ats_hired, 0)        AS ats_hired,
+  IFNULL(aa.ats_unsuccessful, 0) AS ats_unsuccessful,
+  IFNULL(aa.ats_withdrawn, 0)    AS ats_withdrawn,
+  IFNULL(aa.ats_in_progress, 0)  AS ats_in_progress,
   a.min_salary,
   a.max_salary,
   a.currency_code,
@@ -227,6 +262,8 @@ LEFT JOIN `site-monitoring-421401.JPD.t04_importers` imp
   ON a.importer_ID = imp.importer_id
 LEFT JOIN feed_ls_by_entity be ON be.entity_id_str = a.entity_id
 LEFT JOIN impr im ON im.entity_id = a.entity_id
+LEFT JOIN ats_media am ON am.jgp_external_vacancy_id = a.jgp_external_vacancy_id
+LEFT JOIN ats_apps  aa ON aa.jgp_external_vacancy_id = a.jgp_external_vacancy_id
 )
 SELECT
   vac.* EXCEPT (end_date, est_close, est_src),
@@ -510,3 +547,92 @@ SELECT
 FROM agg a
 LEFT JOIN `site-monitoring-421401.JPD.t04_importers` imp
   ON a.importer_ID = imp.importer_id;
+
+
+-- ===========================================================================
+-- T5: t06_summary_application_funnel — one row per (vacancy x media_supplier).
+-- The end-to-end cross-source funnel for the Application Funnel tab: joins the
+-- ATS media funnel (t04_ats_media_source) to the application funnel
+-- (t04_ats_application, by referrer supplier) on the normalised supplier key, and
+-- attaches the vacancy's metadata (from t06_summary_vacancy) so the tab can slice
+-- by occupation / organisation / region / employment type / date. Grain: vacancy
+-- x supplier (via jgp_external_vacancy_id); entity_id_str carried for joins.
+-- avg time-to-hire is stored as sum + count (aggregatable; median is not).
+-- ===========================================================================
+CREATE OR REPLACE TABLE `site-monitoring-421401.JPD.t06_summary_application_funnel`
+CLUSTER BY jgp_external_vacancy_id AS
+WITH vac_meta AS (
+  SELECT entity_id_str, jgp_external_vacancy_id, title, organization_name,
+         primary_uk_region, uk_regions, occupational_fields, category, employment_type,
+         importer_ID, importer_name, start_date, end_date, is_live, vacancy_status
+  FROM `site-monitoring-421401.JPD.t06_summary_vacancy`
+  WHERE jgp_external_vacancy_id IS NOT NULL AND jgp_external_vacancy_id != ''
+),
+media AS (
+  SELECT jgp_external_vacancy_id, media_supplier_key,
+         ANY_VALUE(media_supplier) AS media_supplier,
+         SUM(list_views)            AS list_views,
+         SUM(advert_views)          AS advert_views,
+         SUM(apply_clicks)          AS apply_clicks,
+         SUM(applications_started)  AS applications_started,
+         SUM(submitted_applications) AS submitted_applications
+  FROM `site-monitoring-421401.JPD.t04_ats_media_source`
+  GROUP BY jgp_external_vacancy_id, media_supplier_key
+),
+apps AS (
+  SELECT jgp_external_vacancy_id, referrer_supplier_key AS media_supplier_key,
+         ANY_VALUE(referrer_supplier) AS referrer_supplier,
+         COUNT(*)                        AS n_applications,
+         COUNTIF(is_submitted)           AS n_submitted,
+         COUNTIF(reached_applied)        AS n_applied,
+         COUNTIF(reached_shortlisted)    AS n_shortlisted,
+         COUNTIF(reached_interview)      AS n_interview,
+         COUNTIF(reached_offer)          AS n_offer,
+         COUNTIF(reached_recruited)      AS n_reached_recruited,
+         COUNTIF(outcome = 'hired')      AS n_hired,
+         COUNTIF(outcome = 'unsuccessful') AS n_unsuccessful,
+         COUNTIF(outcome = 'withdrawn')  AS n_withdrawn,
+         COUNTIF(outcome = 'in_progress') AS n_in_progress,
+         SUM(time_to_hire_days)          AS sum_time_to_hire_days,
+         COUNTIF(time_to_hire_days IS NOT NULL) AS n_time_to_hire
+  FROM `site-monitoring-421401.JPD.t04_ats_application`
+  WHERE referrer_supplier_key != ''
+  GROUP BY jgp_external_vacancy_id, referrer_supplier_key
+),
+spine AS (
+  SELECT jgp_external_vacancy_id, media_supplier_key FROM media
+  UNION DISTINCT
+  SELECT jgp_external_vacancy_id, media_supplier_key FROM apps
+)
+SELECT
+  vm.entity_id_str,
+  s.jgp_external_vacancy_id,
+  s.media_supplier_key,
+  COALESCE(m.media_supplier, a.referrer_supplier) AS media_supplier,
+  vm.title, vm.organization_name, vm.primary_uk_region, vm.uk_regions,
+  vm.occupational_fields, vm.category, vm.employment_type,
+  vm.importer_ID, vm.importer_name, vm.start_date, vm.end_date, vm.is_live, vm.vacancy_status,
+  -- media funnel stages
+  IFNULL(m.list_views, 0)            AS list_views,
+  IFNULL(m.advert_views, 0)          AS advert_views,
+  IFNULL(m.apply_clicks, 0)          AS apply_clicks,
+  IFNULL(m.applications_started, 0)  AS applications_started,
+  IFNULL(m.submitted_applications, 0) AS submitted_applications,
+  -- application funnel stages (by referrer supplier)
+  IFNULL(a.n_applications, 0)      AS n_applications,
+  IFNULL(a.n_submitted, 0)         AS n_submitted,
+  IFNULL(a.n_applied, 0)           AS n_applied,
+  IFNULL(a.n_shortlisted, 0)       AS n_shortlisted,
+  IFNULL(a.n_interview, 0)         AS n_interview,
+  IFNULL(a.n_offer, 0)             AS n_offer,
+  IFNULL(a.n_reached_recruited, 0) AS n_reached_recruited,
+  IFNULL(a.n_hired, 0)             AS n_hired,
+  IFNULL(a.n_unsuccessful, 0)      AS n_unsuccessful,
+  IFNULL(a.n_withdrawn, 0)         AS n_withdrawn,
+  IFNULL(a.n_in_progress, 0)       AS n_in_progress,
+  a.sum_time_to_hire_days,
+  IFNULL(a.n_time_to_hire, 0)      AS n_time_to_hire
+FROM spine s
+LEFT JOIN media m USING (jgp_external_vacancy_id, media_supplier_key)
+LEFT JOIN apps  a USING (jgp_external_vacancy_id, media_supplier_key)
+LEFT JOIN vac_meta vm USING (jgp_external_vacancy_id);
