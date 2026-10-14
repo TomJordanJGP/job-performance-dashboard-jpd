@@ -283,6 +283,7 @@ SELECT
   vs.last_event_date,
   vs.clicks,
   vs.applies,
+  vs.impressions,
   vs.title,
   vs.organization_name,
   vs.occupational_fields,
