@@ -55,6 +55,18 @@ KPI_TOOLTIPS = {
         "Total impressions ÷ total vacancies. Bands rank vacancies by clicks "
         "and show each band's per-vacancy impressions."
     ),
+    'Applications': (
+        "Real submitted applications from the ATS — applications actually submitted "
+        "(drafts excluded). Net-new: not available from GA4."
+    ),
+    'Hires': (
+        "Applications currently at 'Recruited' status in the ATS — actual hires from "
+        "these vacancies. Net-new: not available from GA4."
+    ),
+    'App-to-Hire Rate': (
+        "Hires ÷ submitted applications × 100 — the share of applications that "
+        "resulted in a hire."
+    ),
 }
 
 
@@ -119,6 +131,14 @@ def calculate_metrics(df):
         metrics['mean_impressions_per_vacancy'] = impr / n if n > 0 else 0
         metrics['median_impressions_per_vacancy'] = (
             float(np.nanmedian(df['impressions'].values)) if n > 0 else 0)
+
+    # ATS applications/hires (net-new; the ATS layer is kept separate from the GA4
+    # clicks/applies above). Absent until t06 carries the ATS tier, so the views check
+    # for the keys before showing the tiles.
+    if 'ats_applications_submitted' in df.columns:
+        metrics['total_applications'] = int(df['ats_applications_submitted'].sum())
+    if 'ats_hired' in df.columns:
+        metrics['total_hires'] = int(df['ats_hired'].sum())
 
     return metrics
 

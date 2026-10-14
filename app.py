@@ -30,6 +30,7 @@ from data.processing import (
 from data.filters import create_sidebar_filters, apply_filters_to_region_data
 from views.dashboard import render_dashboard
 from views.performance import render_performance
+from views.funnel import render_funnel
 from views.compare import render_compare
 from views.salary import render_salary
 from views.client_report import render_client_report
@@ -56,7 +57,12 @@ def main():
 
     # === DATA LOADING (all data, no date cutoff) ===
     with st.spinner("Loading data..."):
-        df_raw, daily_totals, region_raw, media_df = load_all_data(sample_size=None)
+        # Defensive slice: tolerate an old cached 4-tuple during the rollout window
+        # after this 5-tuple change (see lessons.md — stale @st.cache_data shapes).
+        loaded = load_all_data(sample_size=None)
+        df_raw, daily_totals, region_raw = loaded[:3]
+        media_df = loaded[3] if len(loaded) >= 4 else None
+        funnel_raw = loaded[4] if len(loaded) >= 5 else None
         df = _process_raw_data(df_raw)
         region_df = _process_raw_data(region_raw) if region_raw is not None else None
 
@@ -106,9 +112,10 @@ def main():
         st.warning(stale_warning, icon="⚠️")
 
     # Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "Dashboard",
         "Performance",
+        "Application Funnel",
         "Compare",
         "Salary Benchmarking",
         "Client Report",
@@ -121,12 +128,15 @@ def main():
         render_performance(df, region_df=region_df)
 
     with tab3:
-        render_compare(df)
+        render_funnel(df, funnel_df=funnel_raw)
 
     with tab4:
-        render_salary(df, region_df=region_df)
+        render_compare(df)
 
     with tab5:
+        render_salary(df, region_df=region_df)
+
+    with tab6:
         render_client_report(df, media_df=media_df)
 
 

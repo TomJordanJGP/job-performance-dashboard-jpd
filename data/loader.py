@@ -17,6 +17,7 @@ from data.config import (
     BQ_DAILY_TOTALS_TABLE_ID,
     BQ_REGION_SUMMARY_TABLE_ID,
     BQ_MEDIA_SUMMARY_TABLE_ID,
+    BQ_APPLICATION_FUNNEL_TABLE_ID,
 )
 
 SCOPES = [
@@ -76,9 +77,10 @@ def load_all_data(days_back=None, sample_size=None):
     """Load vacancy, daily totals, region-exploded, and media summaries from BigQuery.
 
     Returns:
-        (vacancy_df, daily_df, region_df, media_df) — region_df and media_df are
-        None if their respective tables don't exist yet; consumers handle None
-        (region: pipe-split fallback in views; media: section hidden in client report).
+        (vacancy_df, daily_df, region_df, media_df, funnel_df) — region_df, media_df
+        and funnel_df are None if their respective tables don't exist yet; consumers
+        handle None (region: pipe-split fallback in views; media: section hidden in
+        client report; funnel: Application Funnel tab empty state).
     """
     try:
         client = get_bigquery_client()
@@ -150,6 +152,22 @@ def load_all_data(days_back=None, sample_size=None):
             impressions_jgp,
             impressions_lg"""
 
+        # ATS first-party layer (added 2026-07-28): per-vacancy ATS media metrics +
+        # application outcomes (from t06_summary_vacancy). Kept SEPARATE from the GA4
+        # clicks/applies (never summed into them). Last tier, so the app runs without it
+        # in the window between deploying this code and the t06 refresh that adds it.
+        ats_fields = """,
+            ats_advert_views,
+            ats_apply_clicks,
+            ats_applications_started,
+            ats_applications,
+            ats_applications_submitted,
+            ats_hired,
+            ats_unsuccessful,
+            ats_withdrawn,
+            ats_in_progress,
+            jgp_external_vacancy_id"""
+
         # Daily totals. Note `impressions*` here = Google impressions of every page on
         # the site (Search Console); onsite_* / google_job_* = vacancy impressions.
         daily_core = """
@@ -195,7 +213,7 @@ def load_all_data(days_back=None, sample_size=None):
 
         vacancy_job = query_with_fallback(
             core_fields,
-            [salary_fields, status_fields, estimate_fields, impression_fields],
+            [salary_fields, status_fields, estimate_fields, impression_fields, ats_fields],
             BQ_TABLE_ID, vacancy_where, limit_clause)
         daily_job = query_with_fallback(
             daily_core, [daily_gsc_fields, daily_impression_fields],
@@ -270,7 +288,29 @@ def load_all_data(days_back=None, sample_size=None):
             pass  # Table/columns not present yet — client report Media section
                   # hides. Narrow catch so transient/infra errors surface.
 
-        return vacancy_df, daily_df, region_df, media_df
+        # ATS application funnel — one row per (vacancy x media_supplier). None if the
+        # table isn't built yet — the Application Funnel tab shows an empty state.
+        funnel_df = None
+        try:
+            funnel_query = f"""
+            SELECT
+                entity_id_str, jgp_external_vacancy_id, media_supplier, media_supplier_key,
+                title, organization_name, primary_uk_region, uk_regions,
+                occupational_fields, category, employment_type, importer_ID, importer_name,
+                start_date, end_date, is_live, vacancy_status,
+                list_views, advert_views, apply_clicks, applications_started, submitted_applications,
+                n_applications, n_submitted, n_applied, n_shortlisted, n_interview, n_offer,
+                n_reached_recruited, n_hired, n_unsuccessful, n_withdrawn, n_in_progress,
+                sum_time_to_hire_days, n_time_to_hire
+            FROM `{BQ_PROJECT_ID}.{BQ_DATASET_ID}.{BQ_APPLICATION_FUNNEL_TABLE_ID}`
+            """
+            funnel_job = client.query(funnel_query)
+            funnel_job.result()
+            funnel_df = funnel_job.to_dataframe(create_bqstorage_client=False)
+        except (NotFound, BadRequest):
+            pass  # Funnel table not present yet — Application Funnel tab empty state.
+
+        return vacancy_df, daily_df, region_df, media_df, funnel_df
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
         st.markdown(f"""

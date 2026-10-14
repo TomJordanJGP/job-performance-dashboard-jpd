@@ -14,3 +14,4 @@ BQ_TABLE_ID = "t06_summary_vacancy"                        # one row per vacancy
 BQ_DAILY_TOTALS_TABLE_ID = "t06_summary_daily_totals"      # one row per day
 BQ_REGION_SUMMARY_TABLE_ID = "t06_summary_vacancy_region"  # one row per (vacancy x region)
 BQ_MEDIA_SUMMARY_TABLE_ID = "t06_summary_media"            # one row per (vacancy x source/medium/campaign)
+BQ_APPLICATION_FUNNEL_TABLE_ID = "t06_summary_application_funnel"  # one row per (vacancy x media_supplier)

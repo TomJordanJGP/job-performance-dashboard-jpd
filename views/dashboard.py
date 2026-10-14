@@ -47,6 +47,8 @@ def render_dashboard(df, daily_totals=None, region_df=None):
 
     # KPI Cards: Vacancies, Clicks, Applies / Apply Rate, Avg Clicks/Vac, Avg Applies/Vac
     # / Impressions, Click-Through Rate, Avg Impressions/Vac (once t06 carries them)
+    # / ATS Applications, Hires, App-to-Hire (once t06 carries them). Clicks/applies are
+    # GA4 only; ATS channel traffic is kept separate on the Application Funnel tab.
     col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown(kpi_card(
@@ -115,6 +117,29 @@ def render_dashboard(df, daily_totals=None, region_df=None):
         for col, card in zip(st.columns(3), impression_kpi_cards(metrics, quartiles, KPI_TOOLTIPS)):
             with col:
                 st.markdown(card, unsafe_allow_html=True)
+
+    # ATS first-party applications (net-new): real submitted applications + hires from
+    # the ATS API. Only shown when the ATS tier is loaded.
+    if 'total_applications' in metrics:
+        _apps = metrics['total_applications']
+        _hires = metrics.get('total_hires', 0)
+        _hire_rate = (_hires / _apps * 100) if _apps > 0 else 0
+        col7, col8, col9 = st.columns(3)
+        with col7:
+            st.markdown(kpi_card(
+                "Applications", _fmt(_apps),
+                tooltip=KPI_TOOLTIPS['Applications'],
+            ), unsafe_allow_html=True)
+        with col8:
+            st.markdown(kpi_card(
+                "Hires", _fmt(_hires),
+                tooltip=KPI_TOOLTIPS['Hires'],
+            ), unsafe_allow_html=True)
+        with col9:
+            st.markdown(kpi_card(
+                "App-to-Hire Rate", f"{round(_hire_rate, 1)}%",
+                tooltip=KPI_TOOLTIPS['App-to-Hire Rate'],
+            ), unsafe_allow_html=True)
 
     st.markdown(branded_divider(), unsafe_allow_html=True)
 
