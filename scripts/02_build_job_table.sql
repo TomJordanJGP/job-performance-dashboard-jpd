@@ -1,9 +1,10 @@
 -- scripts/02_build_job_table.sql
 -- Build JPD.t02_job_table — Silver unified vacancy table from Bronze.
 --
--- One row per external_id. Reads the CURRENT STATE of the 5 Bronze tables
--- (t01_feed_*) — Bronze is already an upsert/current-state model, so no
--- "latest snapshot" logic needed here.
+-- One row per external_id. Reads the CURRENT STATE of the Bronze tables
+-- (t01_feed_*: Appcast + every non-excluded source feed in t00_feed_registry) —
+-- Bronze is already an upsert/current-state model, so no "latest snapshot"
+-- logic needed here.
 --
 -- Three row segments:
 --   - matched      : in Appcast AND in one source feed   (~3,856)
@@ -11,8 +12,9 @@
 --   - source-only  : in a source feed, not yet in Appcast (~26 — entity_id NULL until Jobiqo registers it)
 --
 -- Source-feed priority for defensive dedupe (feeds are mutually exclusive
--- by design — this only fires if two feeds ever broadcast the same id):
---     ATS > Scrape > Civil Service > Backfill
+-- by design — this only fires if two feeds ever broadcast the same id): the
+-- registry `priority` (ATS first; auto-added feeds after the existing ones),
+-- with every retired feed ranked below every live one.
 -- A duplicate detection query is included at the bottom (commented).
 --
 -- Run:  bq query --use_legacy_sql=false < scripts/02_build_job_table.sql
@@ -47,9 +49,10 @@ WITH
 -- ---------------------------------------------------------------------------
 -- 1. Stack the source feeds. Each row carries its source_feed label.
 --    GENERATED — the source_union body and the source-priority CASE below are
---    templated from t00_feed_registry (feed_kind='source', ordered by priority)
---    by scripts/build_job_table.py. Do NOT hand-edit the generated blocks; add
---    a feed via a registry INSERT and rebuild. Civil Service maps jobiqo_org_id
+--    templated from t00_feed_registry (feed_kind='source', not excluded,
+--    ordered by priority) by scripts/build_job_table.py. Do NOT hand-edit the
+--    generated blocks; feeds come from the registry, which the Bronze ingest
+--    keeps in step with the feed map. Civil Service maps jobiqo_org_id
 --    -> organization_id and has no organization_name/organization_type (NULL'd).
 -- ---------------------------------------------------------------------------
 source_union AS (

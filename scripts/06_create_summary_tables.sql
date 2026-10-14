@@ -125,7 +125,9 @@ regions AS (
   GROUP BY entity_id
 ),
 -- Feed drop-out date: MAX(last_seen) per entity_id across every feed that carries
--- it (all t01_feed_* except selfservice, which has no feed poll). Keyed on
+-- it: Appcast plus the source feeds in t01_source_feeds (a view over the
+-- registry's feeds, rebuilt by build_job_table.py; selfservice has no feed poll,
+-- so it isn't in it). Keyed on
 -- entity_id ONLY. external_id is a content hash, NOT unique: the same hash maps to
 -- multiple entity_ids for re-listed/duplicate content, so an external_id match
 -- would pull an unrelated live vacancy's last_seen onto a closed one (verified:
@@ -136,11 +138,7 @@ feed_ls_by_entity AS (
   SELECT CAST(entity_id AS STRING) AS entity_id_str, MAX(last_seen) AS ls
   FROM (
               SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_appcast`
-    UNION ALL SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_ats`
-    UNION ALL SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_scrape`
-    UNION ALL SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_civil_service`
-    UNION ALL SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_backfill`
-    UNION ALL SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_feed_jgp_london_backfill`
+    UNION ALL SELECT entity_id, last_seen FROM `site-monitoring-421401.JPD.t01_source_feeds`
   )
   WHERE entity_id IS NOT NULL
   GROUP BY entity_id_str
@@ -413,14 +411,10 @@ vac_frontends AS (
   -- lgjobs). Keyed by external_id; covers ~98% of LIVE vacancies. Older expired
   -- vacancies predate frontends population (mostly NULL) — those fall back to the
   -- GA4 `sites` (traffic) signal below. Appcast (the master) does not emit
-  -- frontends, so this reads the source-feed Bronze tables directly.
-  SELECT external_id, ANY_VALUE(frontends) AS frontends FROM (
-    SELECT external_id, frontends FROM `site-monitoring-421401.JPD.t01_feed_ats`                 WHERE frontends IS NOT NULL
-    UNION ALL SELECT external_id, frontends FROM `site-monitoring-421401.JPD.t01_feed_scrape`              WHERE frontends IS NOT NULL
-    UNION ALL SELECT external_id, frontends FROM `site-monitoring-421401.JPD.t01_feed_civil_service`       WHERE frontends IS NOT NULL
-    UNION ALL SELECT external_id, frontends FROM `site-monitoring-421401.JPD.t01_feed_backfill`            WHERE frontends IS NOT NULL
-    UNION ALL SELECT external_id, frontends FROM `site-monitoring-421401.JPD.t01_feed_jgp_london_backfill` WHERE frontends IS NOT NULL
-  )
+  -- frontends, so this reads the source feeds via t01_source_feeds.
+  SELECT external_id, ANY_VALUE(frontends) AS frontends
+  FROM `site-monitoring-421401.JPD.t01_source_feeds`
+  WHERE frontends IS NOT NULL
   GROUP BY external_id
 ),
 vac_effective AS (
