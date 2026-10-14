@@ -272,12 +272,15 @@ SELECT
   -- country_name so output is clean (London / North West / Scotland / etc).
   --   Tier 1: vacancy's postcode → t04_postcodes.region_name
   --   Tier 2: vacancy's city → t04_postcodes.town_name then city_name
-  --   Tier 3: vacancy's organization_id → t04_organisations.postcode → t04_postcodes
+  --   Tier 3: vacancy's organization_id → t04_organisations.postcode → t04_postcodes,
+  --           the source feed's id first, then Appcast's (an org can carry a
+  --           different id per feed, and not every namespace is in t04_organisations)
   COALESCE(
-    IF(t1_postcode.region_name LIKE '(pseudo) %', t1_postcode.country_name, t1_postcode.region_name),
-    IF(t2_town.region_name     LIKE '(pseudo) %', t2_town.country_name,     t2_town.region_name),
-    IF(t2_city.region_name     LIKE '(pseudo) %', t2_city.country_name,     t2_city.region_name),
-    IF(t3_hq.region_name       LIKE '(pseudo) %', t3_hq.country_name,       t3_hq.region_name)
+    IF(t1_postcode.region_name   LIKE '(pseudo) %', t1_postcode.country_name,   t1_postcode.region_name),
+    IF(t2_town.region_name       LIKE '(pseudo) %', t2_town.country_name,       t2_town.region_name),
+    IF(t2_city.region_name       LIKE '(pseudo) %', t2_city.country_name,       t2_city.region_name),
+    IF(t3_hq.region_name         LIKE '(pseudo) %', t3_hq.country_name,         t3_hq.region_name),
+    IF(t3_hq_appcast.region_name LIKE '(pseudo) %', t3_hq_appcast.country_name, t3_hq_appcast.region_name)
   ) AS uk_region,
 
   -- occupation: narrow classification, source feed only (no Appcast equivalent)
@@ -308,11 +311,20 @@ SELECT
     ELSE 'default'
   END AS workflow_state_source,
 
-  -- start_date: source.start_date ▸ Appcast.date_posted
-  COALESCE(source_start_date, appcast_date_posted) AS start_date,
+  -- start_date: source.start_date ▸ Appcast.date_posted, EXCEPT when the feed's
+  -- date is more than 30 days before Appcast's. A feed's own date can be the
+  -- employer's original posting date (Organic-1 carries dates back to 2016),
+  -- while date_posted is when the vacancy went live on JGP, so the old date
+  -- would count it as active on our boards for years before it reached them.
+  -- Gaps of up to 30 days are the routine lag before Appcast publishes a feed's
+  -- job (mostly 1-7 days) and keep the feed's date (Tom, 2026-10-14).
+  IF(source_start_date IS NULL
+       OR DATE_DIFF(DATE(appcast_date_posted), DATE(source_start_date), DAY) > 30,
+     appcast_date_posted, source_start_date) AS start_date,
   CASE
-    WHEN source_start_date   IS NOT NULL THEN source_feed
-    WHEN appcast_date_posted IS NOT NULL THEN 'Appcast'
+    WHEN DATE_DIFF(DATE(appcast_date_posted), DATE(source_start_date), DAY) > 30
+      OR (source_start_date IS NULL AND appcast_date_posted IS NOT NULL) THEN 'Appcast'
+    WHEN source_start_date IS NOT NULL THEN source_feed
     ELSE NULL
   END AS start_date_source,
 
@@ -389,6 +401,10 @@ LEFT JOIN city_to_region AS t2_city
 -- has no usable location data.
 LEFT JOIN hq_to_region AS t3_hq
   ON COALESCE(source_org_id, appcast_org_id) = t3_hq.organization_id
+-- Region tier 3b: Appcast's org id, for when the source feed's id is in a
+-- namespace t04_organisations doesn't hold (e.g. Organic-1).
+LEFT JOIN hq_to_region AS t3_hq_appcast
+  ON appcast_org_id = t3_hq_appcast.organization_id
 
 UNION ALL
 
