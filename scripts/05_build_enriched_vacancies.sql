@@ -185,8 +185,10 @@ LEFT JOIN (
 -- GM, Exxon, stripe test, etc.) exist only as orphan GA4 events — no t02 row — so
 -- dropping them here removes them from t05 + t06 durably. A DELETE on t04 would be
 -- re-pulled by the next GA4 sync; this filter survives every rebuild.
-WHERE CAST(e.entity_id AS STRING) NOT IN
-  ('20', '23', '28', '29', '40', '62', '65', '77')
+-- The IS NULL arm keeps events GA4 sent without an entity_id: `NULL NOT IN (...)` is
+-- NULL, so without it they silently vanished from every t06 table, daily totals included.
+WHERE e.entity_id IS NULL
+   OR CAST(e.entity_id AS STRING) NOT IN ('20', '23', '28', '29', '40', '62', '65', '77')
 
 UNION ALL
 
