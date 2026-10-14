@@ -673,7 +673,8 @@ def sync_feed_map(client, dry_run):
     if plan['held']:
         names = ', '.join(r['feed_name'] for r in plan['held'])
         msg = (f"feed map is missing {len(plan['held'])} active feeds at once ({names}); "
-               f"looks truncated, so none were retired")
+               f"looks truncated, so none were retired. If they really were removed, set "
+               f"active = FALSE on those rows in t00_feed_registry")
         announce(msg, 'error')
         problems.append(msg)
 
