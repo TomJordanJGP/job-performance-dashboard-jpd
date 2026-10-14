@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Bronze ingest — upsert the 5 job feeds into JPD.t01_feed_* current-state tables.
+"""Bronze ingest — upsert the job feeds into JPD.t01_feed_* current-state tables.
+
+Before polling, the registry is reconciled with the private feed map (see
+sync_feed_map): a feed new to the map is validated and added, a feed that left it
+is retired, a retired feed that came back is reactivated. So every live feed is
+ingested without anyone editing the registry.
 
 Each table holds ONE row per vacancy, kept forever (a history of every vacancy that
 has ever appeared), always showing the latest field values. This is NOT a per-day
@@ -14,8 +19,9 @@ so polling can run several times a day cheaply (only genuinely-new rows are adde
 
 Feeds (root <jobs> -> many <job>):
   - Appcast (Jobiqo)  — registry. <id> = entity_id (always present), <external_id> = hash.
-  - Scrape / ATS / Civil Service / Backfill — <id> = hash (external_id), no entity_id.
-The four source feeds are mutually exclusive; Appcast overlays ~99% and supplies entity_id.
+  - Source feeds (ATS, Scrape, Civil Service, Backfill, ... and whatever the feed map
+    adds) — <id> = hash (external_id), no entity_id.
+The source feeds are mutually exclusive; Appcast overlays ~99% and supplies entity_id.
 
 MERGE match key:
   - source feeds: external_id (always present, stable).
@@ -34,6 +40,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import argparse
 import xml.etree.ElementTree as ET
@@ -368,6 +375,13 @@ def _target_schema(content):
 # --------------------------------------------------------------------------- #
 # Fetch + upsert
 # --------------------------------------------------------------------------- #
+def safe_error(e):
+    """An exception summary that can't contain a URL: requests puts the URL in
+    the message of most of its errors, and feed URLs are private."""
+    status = getattr(getattr(e, 'response', None), 'status_code', None)
+    return f"{type(e).__name__}" + (f" (HTTP {status})" if status else "")
+
+
 def fetch_feed(feed_name, url):
     print(f"  Fetching {feed_name}...", end=' ', flush=True)
     try:
@@ -377,7 +391,7 @@ def fetch_feed(feed_name, url):
         print(f"{len(jobs):,} jobs ({len(resp.content) / 1e6:.1f} MB)")
         return jobs
     except Exception as e:
-        print(f"FAILED: {type(e).__name__}: {e}")
+        print(f"FAILED: {safe_error(e)}")
         return []
 
 
@@ -452,12 +466,13 @@ def _pct(num, den):
 
 
 def load_registry(client):
-    """Active feeds from t00_feed_registry. The URL/table/shape/priority all live
-    here now, not in this file — so adding a matched feed is a one-row INSERT."""
+    """Active, non-excluded feeds from t00_feed_registry. The URL/table/shape/
+    priority all live there, not in this file; sync_feed_map keeps the source
+    rows in step with the feed map."""
     q = f"""
     SELECT feed_name, url, table_name, feed_kind, shape, org_id_column, priority
     FROM `{REGISTRY_TABLE}`
-    WHERE active
+    WHERE active AND feed_kind IN ('source', 'appcast') AND NOT COALESCE(excluded, FALSE)
     ORDER BY feed_kind, priority
     """
     return [dict(r.items()) for r in client.query(q).result()]
@@ -505,6 +520,219 @@ def write_run_log(client, rows):
     job_config = bigquery.LoadJobConfig(write_disposition='WRITE_APPEND', schema=runs_schema())
     client.load_table_from_json(rows, RUNS_TABLE, job_config=job_config).result()
 
+# --------------------------------------------------------------------------- #
+# Feed-map discovery
+# --------------------------------------------------------------------------- #
+# The feed map (its URL is the registry row with feed_kind = 'map') lists every
+# feed JGP runs. Each run reconciles the registry with it before polling, matching
+# on the exact URL:
+#   - a map URL that no registry row has    -> validated, then added as an 'ats'
+#     shape source feed (every map feed uses the ATS layout)
+#   - an active source feed not in the map  -> retired: no longer polled, but its
+#     Bronze table stays and t02 keeps its vacancies
+#   - a retired source feed back in the map -> reactivated
+# Rows with excluded = TRUE (the test feed, Tribepad) are a human override and are
+# never touched, nor is the Appcast overlay (not in the map). Logs name feeds,
+# never URLs: the map and the feed URLs are private.
+
+# If more than this share of the active source feeds would retire in one run, the
+# map is more likely truncated than the feeds gone: retire nothing that run.
+MAX_RETIRE_SHARE = 0.5
+# Labels t02 already uses for its own segments, and Bronze tables made by hand
+# outside the registry — a new feed must not take either.
+RESERVED_FEED_NAMES = {'appcast', 'self-service'}
+RESERVED_TABLES = {'t01_feed_appcast', 't01_feed_selfservice'}
+
+
+def parse_feed_map(content):
+    """The feed map XML: <items><lastBuildDate/><item><name/><url/></item>...</items>
+    -> [{'name', 'url'}], one per distinct URL, in map order."""
+    items, seen = [], set()
+    for it in ET.fromstring(content).findall('item'):
+        url = (it.findtext('url') or '').strip()
+        if url and url not in seen:
+            seen.add(url)
+            items.append({'name': (it.findtext('name') or '').strip() or 'Unnamed feed', 'url': url})
+    return items
+
+
+def plan_map_changes(map_items, registry_rows):
+    """Pure: the registry changes that make the source feeds match the map.
+
+    registry_rows is EVERY registry row (any feed_kind, excluded or not) as dicts
+    with url, feed_kind, active, excluded — a URL any row already has is never
+    re-added, which is what keeps excluded feeds out. Returns lists add (map
+    items), retire, reactivate (registry rows) and held (retirements skipped
+    because so many at once means a truncated map)."""
+    known = {r['url'] for r in registry_rows if r['url']}
+    in_map = {i['url'] for i in map_items}
+    managed = [r for r in registry_rows if r['feed_kind'] == 'source' and not r['excluded']]
+    retire = [r for r in managed if r['active'] and r['url'] not in in_map]
+    n_active = sum(1 for r in managed if r['active'])
+    held = []
+    if retire and len(retire) > MAX_RETIRE_SHARE * n_active:
+        held, retire = retire, []
+    return {
+        'add': [i for i in map_items if i['url'] not in known],
+        'retire': retire,
+        'reactivate': [r for r in managed if not r['active'] and r['url'] in in_map],
+        'held': held,
+    }
+
+
+def slugify(name):
+    """'Jgp Myjobscotland Feed' -> 'myjobscotland', 'Organic-1 feed' -> 'organic_1'."""
+    s = re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
+    s = re.sub(r'_feed$', '', re.sub(r'^jgp_', '', s))
+    return s or 'feed'
+
+
+def allocate_identity(name, taken_names, taken_tables):
+    """A feed_name and table_name for a new feed that clash with nothing already
+    used (or reserved), suffixing ' (2)' / '_2' as needed. Updates both sets so
+    several feeds added in one run can't collide with each other."""
+    feed_name, n = name, 2
+    while feed_name.lower() in taken_names or feed_name.lower() in RESERVED_FEED_NAMES:
+        feed_name, n = f"{name} ({n})", n + 1
+    base = f"t01_feed_{slugify(name)}"
+    table, n = base, 2
+    while table in taken_tables or table in RESERVED_TABLES or f"{table}_staging" in taken_tables:
+        table, n = f"{base}_{n}", n + 1
+    taken_names.add(feed_name.lower())
+    taken_tables.update({table, f"{table}_staging"})
+    return feed_name, table
+
+
+def announce(msg, level='warning'):
+    """Print a registry change or problem; under GitHub Actions also annotate the
+    run so it shows on the run summary."""
+    print(f"  {msg}")
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::{level}::{msg}")
+
+
+def _registry_dml(client, sql, **params):
+    from google.cloud import bigquery
+    cfg = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter(k, 'INT64' if isinstance(v, int) else 'STRING', v)
+        for k, v in params.items()])
+    job = client.query(sql, job_config=cfg)
+    job.result()
+    return job.num_dml_affected_rows or 0
+
+
+def sync_feed_map(client, dry_run):
+    """Reconcile t00_feed_registry with the feed map (see the section comment).
+
+    Returns (prefetched, planned, problems):
+      prefetched  {feed_name: parsed rows} for feeds validated this run, so main()
+                  doesn't download them a second time
+      planned     registry dicts a dry run would add, so the preflight reports them
+      problems    soft failures: the run still ingests every registered feed, then
+                  exits 2 so the refresh is flagged
+    A map that can't be fetched or lists nothing never changes the registry."""
+    print("\nFeed map: reconciling the registry")
+    rows = [dict(r.items()) for r in client.query(f"""
+        SELECT feed_name, url, table_name, feed_kind, active, priority,
+               COALESCE(excluded, FALSE) AS excluded
+        FROM `{REGISTRY_TABLE}`""").result()]
+    maps = [r for r in rows if r['feed_kind'] == 'map']
+    if not maps:
+        msg = "no feed map row in t00_feed_registry (feed_kind = 'map'); discovery skipped"
+        announce(msg, 'error')
+        return {}, [], [msg]
+    maps = [r for r in maps if not r['excluded']]
+    if not maps:
+        print("  discovery paused (the feed map row is excluded)")
+        return {}, [], []
+    if len(maps) > 1:
+        msg = f"{len(maps)} feed map rows in t00_feed_registry; expected one. Discovery skipped"
+        announce(msg, 'error')
+        return {}, [], [msg]
+
+    try:
+        resp = requests.get(maps[0]['url'], timeout=60)
+        resp.raise_for_status()
+        items = parse_feed_map(resp.content)
+    except Exception as e:
+        msg = f"feed map unavailable ({safe_error(e)}); registry left as is"
+        announce(msg, 'error')
+        return {}, [], [msg]
+    if not items:
+        msg = "feed map lists no feeds; registry left as is"
+        announce(msg, 'error')
+        return {}, [], [msg]
+
+    plan = plan_map_changes(items, rows)
+    print(f"  {len(items)} feeds in the map: {len(plan['add'])} new, "
+          f"{len(plan['retire'])} to retire, {len(plan['reactivate'])} to reactivate")
+    prefetched, planned, problems = {}, [], []
+    verb = "would " if dry_run else ""
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+    if plan['held']:
+        names = ', '.join(r['feed_name'] for r in plan['held'])
+        msg = (f"feed map is missing {len(plan['held'])} active feeds at once ({names}); "
+               f"looks truncated, so none were retired")
+        announce(msg, 'error')
+        problems.append(msg)
+
+    if plan['add']:
+        taken_names = {r['feed_name'].lower() for r in rows if r['feed_name']}
+        taken_tables = {r.table_name for r in client.query(
+            f"SELECT table_name FROM `{BQ_PROJECT}.{BQ_DATASET}.INFORMATION_SCHEMA.TABLES`").result()}
+        for r in rows:
+            if r['table_name']:
+                taken_tables.update({r['table_name'], f"{r['table_name']}_staging"})
+        priority = max((r['priority'] for r in rows
+                        if r['feed_kind'] == 'source' and r['priority'] is not None), default=0)
+
+    for item in plan['add']:
+        # Validate before registering: a feed the ATS parser can't read, or whose
+        # jobs lack an <id> (the MERGE key), would insert junk or duplicate rows.
+        parsed = parse_ats(fetch_feed(item['name'], item['url']))
+        no_id = sum(1 for r in parsed if not r['external_id'])
+        if not parsed or no_id:
+            why = "no jobs" if not parsed else f"{no_id} of {len(parsed)} jobs have no <id>"
+            msg = f"new feed '{item['name']}' in the feed map not added: {why}"
+            announce(msg, 'error')
+            problems.append(msg)
+            continue
+        feed_name, table = allocate_identity(item['name'], taken_names, taken_tables)
+        priority += 1
+        feed = dict(feed_name=feed_name, url=item['url'], table_name=table, feed_kind='source',
+                    shape='ats', org_id_column='organization_id', priority=priority)
+        if not dry_run:
+            # NOT EXISTS guards against two runs adding the same URL at once.
+            _registry_dml(client, f"""
+                INSERT INTO `{REGISTRY_TABLE}` (feed_name, url, table_name, feed_kind, shape,
+                    org_id_column, priority, active, excluded, notes, added_at)
+                SELECT @name, @url, @tbl, 'source', 'ats', 'organization_id', @prio, TRUE, FALSE,
+                       @note, CURRENT_TIMESTAMP()
+                FROM UNNEST([1])
+                WHERE NOT EXISTS (SELECT 1 FROM `{REGISTRY_TABLE}` WHERE url = @url)""",
+                name=feed_name, url=item['url'], tbl=table, prio=priority,
+                note=f"Auto-added from the feed map {today}.")
+        else:
+            planned.append(feed)
+        prefetched[feed_name] = parsed
+        announce(f"feed map: {verb}add '{feed_name}' ({len(parsed):,} jobs) as {table}, priority {priority}")
+
+    for r, active, note in ([(r, False, f"Retired {today}: not in the feed map.") for r in plan['retire']]
+                            + [(r, True, f"Reactivated {today}: back in the feed map.") for r in plan['reactivate']]):
+        if not dry_run:
+            _registry_dml(client, f"""
+                UPDATE `{REGISTRY_TABLE}`
+                SET active = {'TRUE' if active else 'FALSE'},
+                    notes = CONCAT(IFNULL(CONCAT(notes, ' '), ''), @note)
+                WHERE url = @url AND feed_kind = 'source' AND NOT COALESCE(excluded, FALSE)""",
+                url=r['url'], note=note)
+        announce(f"feed map: {verb}{'reactivate' if active else 'retire'} '{r['feed_name']}'")
+
+    if not (plan['add'] or plan['retire'] or plan['reactivate'] or plan['held']):
+        print("  no changes")
+    return prefetched, planned, problems
+
 
 def main():
     ap = argparse.ArgumentParser(
@@ -522,16 +750,21 @@ def main():
 
     content_schemas = _content_schema()
     client = get_client()                      # always — the feed list lives in BQ now
-    feeds = load_registry(client)
-    print(f"Loaded {len(feeds)} active feed(s) from t00_feed_registry")
+    prefetched, planned, map_problems = sync_feed_map(client, args.dry_run)
+    feeds = load_registry(client) + planned    # planned is non-empty only in a dry run
+    print(f"\nLoaded {len(feeds)} active feed(s) from t00_feed_registry"
+          + (f" (+{len(planned)} a live run would add)" if planned else ""))
     if not feeds:
         print("No active feeds — nothing to do.")
-        return
+        sys.exit(2 if map_problems else 0)
 
     # Fetch + parse every active feed
     frames = {}
     print("\nFetching + parsing feeds...")
     for feed in feeds:
+        if feed['feed_name'] in prefetched:    # fetched + parsed while validating it
+            frames[feed['feed_name']] = prefetched[feed['feed_name']]
+            continue
         parser = PARSER_BY_SHAPE.get(feed['shape'])
         if parser is None:
             print(f"  {feed['feed_name']}: no parser for shape '{feed['shape']}' — skipped")
@@ -593,6 +826,8 @@ def main():
         print(f"\n[DRY RUN] No writes. Parsed {total:,} rows across {len(feeds)} feeds.")
         if empty_feeds:
             print(f"[DRY RUN] Would warn on empty feed(s): {', '.join(empty_feeds)}")
+        if map_problems:
+            print(f"[DRY RUN] Would flag {len(map_problems)} feed-map problem(s) (exit 2)")
         print(f"Completed in {(datetime.now() - start).total_seconds():.0f}s")
         return
 
@@ -635,6 +870,9 @@ def main():
     errored = [r['feed_name'] for r in run_rows if r['status'] == 'error']
     if errored:
         print(f"WARNING: {len(errored)} feed(s) failed to MERGE: {', '.join(errored)}")
+    for msg in map_problems:
+        print(f"WARNING: feed map: {msg}")
+    if errored or map_problems:
         sys.exit(2)
 
 
