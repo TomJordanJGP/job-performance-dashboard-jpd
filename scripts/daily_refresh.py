@@ -9,8 +9,9 @@ MERGE failed): downstream still rebuilds, but the whole run exits non-zero so CI
 marks it failed.
 
 Order:
-    1. Bronze ingest        01_sync_bronze_feeds.py     -> t01_feed_*
-    2. Silver: job table    build_job_table.py          -> t02_job_table
+    1. Bronze ingest        01_sync_bronze_feeds.py     -> t01_feed_* (first syncs the
+                            registry with the feed map: adds / retires source feeds)
+    2. Silver: job table    build_job_table.py          -> t01_source_feeds view + t02_job_table
     3. Silver: GA4 sync     04_sync_ga4_events.sql      -> t04_vacancy_events
     4. Silver: GA4 ids      04_recover_ga4_entity_ids.sql -> t04_vacancy_events (id-less events)
     5. Silver: GSC sync     04_sync_gsc_daily.sql       -> t04_gsc_daily

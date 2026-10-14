@@ -4,11 +4,14 @@
 Two tables, both prefixed t00_ (pre-pipeline config/reference — sorts first in
 the BQ console):
 
-  - t00_feed_registry : the hand-maintained list of polled feeds. ONE row per
-    feed. The pipeline reads this before every run, so ADDING A FEED IS A SINGLE
-    INSERT here — no code change. Feed URLs live ONLY in this table (never in
-    git), which is why this script seeds them from a gitignored bootstrap file
-    rather than hardcoding them.
+  - t00_feed_registry : the list of polled feeds, ONE row per feed, plus one
+    feed_kind = 'map' row holding the feed map's URL. The Bronze ingest
+    reconciles the source rows with the feed map before every run (adds new
+    feeds, retires ones that left it), so nobody edits it by hand to add a
+    feed. Set `excluded = TRUE` on a row to keep a feed out for good (never
+    polled, never in t02, never re-added). Feed URLs live ONLY in this table
+    (never in git), which is why this script seeds them from a gitignored
+    bootstrap file rather than hardcoding them.
 
   - t00_feed_runs : append-only log. One row per (feed, run) written by
     01_sync_bronze_feeds.py — when each feed was polled, how many jobs it
@@ -22,11 +25,13 @@ Seeding: reads `feed_registry_seed.json` from the project root (gitignored —
 .gitignore ignores all *.json). Shape (one object per feed):
     {
       "feed_name": "ATS", "url": "https://…", "table_name": "t01_feed_ats",
-      "feed_kind": "source",          # 'source' | 'appcast'
+      "feed_kind": "source",          # 'source' | 'appcast' | 'map' (the feed map)
       "shape": "ats",                 # 'scrape' | 'ats' | 'civil_service' | 'appcast'
       "org_id_column": "organization_id",
       "priority": 1,                  # source dedupe order; null for the overlay
-      "active": true, "notes": null
+      "active": true,                 # polled; the feed map manages it for sources
+      "excluded": false,              # true = permanently out (human override)
+      "notes": null
     }
 If the registry is already populated the seed file is ignored.
 
@@ -69,7 +74,7 @@ def registry_schema():
     return [
         S("feed_name"), S("url"), S("table_name"),
         S("feed_kind"), S("shape"), S("org_id_column"),
-        S("priority", "INT64"), S("active", "BOOL"),
+        S("priority", "INT64"), S("active", "BOOL"), S("excluded", "BOOL"),
         S("notes"), S("added_at", "TIMESTAMP"),
     ]
 
@@ -116,6 +121,7 @@ def seed_registry(client, table_id):
     for r in rows:
         r.setdefault("org_id_column", "organization_id")
         r.setdefault("active", True)
+        r.setdefault("excluded", False)
         r.setdefault("notes", None)
         r.setdefault("priority", None)
         r["added_at"] = now
@@ -132,15 +138,16 @@ def seed_registry(client, table_id):
 def report(client, table_id):
     print("\nRegistry contents:")
     q = f"""
-    SELECT feed_name, feed_kind, shape, priority, active,
+    SELECT feed_name, feed_kind, shape, priority, active, COALESCE(excluded, FALSE) AS excluded,
            IF(url IS NULL OR url = '', '(no url)', 'set') AS url_state
     FROM `{table_id}`
     ORDER BY feed_kind, priority
     """
     for r in client.query(q).result():
         prio = r.priority if r.priority is not None else "-"
-        print(f"  {r.feed_name:14s} kind={r.feed_kind:7s} shape={r.shape:13s} "
-              f"prio={str(prio):>2s} active={str(r.active):5s} url={r.url_state}")
+        print(f"  {r.feed_name:14s} kind={r.feed_kind:7s} shape={r.shape or '-':13s} "
+              f"prio={str(prio):>2s} active={str(r.active):5s} "
+              f"excluded={str(r.excluded):5s} url={r.url_state}")
 
 
 def main():
