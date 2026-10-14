@@ -1,5 +1,7 @@
 -- One-off: (re)create JPD.t04_vacancy_events (partitioned + clustered) and backfill all history.
--- After this, scripts/04_sync_ga4_events.sql handles the daily 7-day window.
+-- After this, scripts/04_sync_ga4_events.sql handles the daily 7-day window. Run the daily
+-- refresh straight after a re-seed: its 04_recover_ga4_entity_ids.sql step re-matches the
+-- id-less events across all history, which this script leaves NULL.
 --
 -- Why this exists separately from the daily sync:
 --   The daily sync assumes the destination already has full history; this seeds it. Re-run
@@ -18,6 +20,7 @@ CREATE OR REPLACE TABLE `site-monitoring-421401.JPD.t04_vacancy_events`
   event_date_dt DATE,
   hour_of_day STRING,
   entity_id INT64,
+  entity_id_source STRING OPTIONS (description = "Where entity_id came from: ga4 (sent by GA4), url (job page URL), match_fingerprint / match_ats (inferred by scripts/04_recover_ga4_entity_ids.sql); NULL = unattributed"),
   entity_type STRING,
   entity_subtype STRING,
   organization_name STRING,
@@ -56,7 +59,8 @@ OPTIONS (
 
 INSERT INTO `site-monitoring-421401.JPD.t04_vacancy_events`
 (
-  event_name, event_date, event_date_dt, hour_of_day, entity_id, entity_type, entity_subtype,
+  event_name, event_date, event_date_dt, hour_of_day, entity_id, entity_id_source,
+  entity_type, entity_subtype,
   organization_name, title, application_type, occupations, regions, employment_types,
   importer_ID, current_user_id, user_role, owner_id, organization_id,
   page_referrer, page_location, upgrades, ats_vacancy_number, ats_account_number,
@@ -69,8 +73,9 @@ SELECT
   event_date AS event_date_dt,
   hour_of_day,
   -- Missing entity_id falls back to the id in the job page URL; see 04_sync_ga4_events.sql.
-  COALESCE(entity_id, SAFE_CAST(
-    REGEXP_EXTRACT(page_location, r'/job/[^/?#]*-(\d+)(?:[/?#]|$)') AS INT64)) AS entity_id,
+  COALESCE(entity_id, url_id) AS entity_id,
+  CASE WHEN entity_id IS NOT NULL THEN 'ga4'
+       WHEN url_id IS NOT NULL THEN 'url' END AS entity_id_source,
   entity_type, entity_subtype,
   organization_name, title, application_type, occupations, regions, employment_types,
   importer_ID, current_user_id, user_role, owner_id, organization_id,
@@ -78,7 +83,10 @@ SELECT
   salary_currency, salary_low, salary_high, device, operating_system, browser,
   campaign, medium, source, Events,
   _source_sitename AS site
-FROM `jobsgopublic.aggregated_data.ga4_job_events__jobsgopublic`
--- Rows without a date would land in t04's NULL partition, which the daily sync's DELETE
--- never matches.
-WHERE event_date IS NOT NULL;
+FROM (
+  SELECT *, SAFE_CAST(REGEXP_EXTRACT(page_location, r'/job/[^/?#]*-(\d+)(?:[/?#]|$)') AS INT64) AS url_id
+  FROM `jobsgopublic.aggregated_data.ga4_job_events__jobsgopublic`
+  -- Rows without a date would land in t04's NULL partition, which the daily sync's DELETE
+  -- never matches.
+  WHERE event_date IS NOT NULL
+);

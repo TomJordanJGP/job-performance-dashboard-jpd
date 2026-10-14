@@ -21,7 +21,8 @@ WHERE event_date_dt >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY);
 -- Step 2: Re-insert last 7 days (plus any new dates) from source
 INSERT INTO `site-monitoring-421401.JPD.t04_vacancy_events`
 (
-  event_name, event_date, event_date_dt, hour_of_day, entity_id, entity_type, entity_subtype,
+  event_name, event_date, event_date_dt, hour_of_day, entity_id, entity_id_source,
+  entity_type, entity_subtype,
   organization_name, title, application_type, occupations, regions, employment_types,
   importer_ID, current_user_id, user_role, owner_id, organization_id,
   page_referrer, page_location, upgrades, ats_vacancy_number, ats_account_number,
@@ -36,9 +37,11 @@ SELECT
   -- Since ~2026-08-10 GA4 sends a growing share of events without entity_id (~13% by
   -- Oct 2026, both sites). On job pages the URL ends in the vacancy id (/job/<slug>-<id>),
   -- which matched entity_id on every row carrying both (184,218 rows, Sep-Oct 2026), so it
-  -- fills the gap there. Search-page events carry no id and stay NULL.
-  COALESCE(entity_id, SAFE_CAST(
-    REGEXP_EXTRACT(page_location, r'/job/[^/?#]*-(\d+)(?:[/?#]|$)') AS INT64)) AS entity_id,
+  -- fills the gap there. Listing/organisation-page events carry no id in the URL; the next
+  -- pipeline step (04_recover_ga4_entity_ids.sql) matches those on their vacancy details.
+  COALESCE(entity_id, url_id) AS entity_id,
+  CASE WHEN entity_id IS NOT NULL THEN 'ga4'
+       WHEN url_id IS NOT NULL THEN 'url' END AS entity_id_source,
   entity_type, entity_subtype,
   organization_name, title, application_type, occupations, regions, employment_types,
   importer_ID, current_user_id, user_role, owner_id, organization_id,
@@ -46,8 +49,11 @@ SELECT
   salary_currency, salary_low, salary_high, device, operating_system, browser,
   campaign, medium, source, Events,
   _source_sitename AS site
-FROM `jobsgopublic.aggregated_data.ga4_job_events__jobsgopublic` AS src
--- Same window as the DELETE above; prunes to the source's last 7 partitions. NULL
--- event_dates fail the comparison, so nothing lands in t04's NULL partition (which
--- the DELETE never matches).
-WHERE src.event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY);
+FROM (
+  SELECT *, SAFE_CAST(REGEXP_EXTRACT(page_location, r'/job/[^/?#]*-(\d+)(?:[/?#]|$)') AS INT64) AS url_id
+  FROM `jobsgopublic.aggregated_data.ga4_job_events__jobsgopublic`
+  -- Same window as the DELETE above; prunes to the source's last 7 partitions. NULL
+  -- event_dates fail the comparison, so nothing lands in t04's NULL partition (which
+  -- the DELETE never matches).
+  WHERE event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+);

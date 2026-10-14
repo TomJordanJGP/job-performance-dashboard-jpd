@@ -12,16 +12,17 @@ Order:
     1. Bronze ingest        01_sync_bronze_feeds.py     -> t01_feed_*
     2. Silver: job table    build_job_table.py          -> t02_job_table
     3. Silver: GA4 sync     04_sync_ga4_events.sql      -> t04_vacancy_events
-    4. Silver: GSC sync     04_sync_gsc_daily.sql       -> t04_gsc_daily
-    5. Gold:   enriched     05_build_enriched_vacancies.sql -> t05_enriched_vacancies
-    6. Gold:   summaries    06_create_summary_tables.sql    -> t06_summary_*
+    4. Silver: GA4 ids      04_recover_ga4_entity_ids.sql -> t04_vacancy_events (id-less events)
+    5. Silver: GSC sync     04_sync_gsc_daily.sql       -> t04_gsc_daily
+    6. Gold:   enriched     05_build_enriched_vacancies.sql -> t05_enriched_vacancies
+    7. Gold:   summaries    06_create_summary_tables.sql    -> t06_summary_*
 Then a freshness check (see FRESHNESS_CHECKS): a source that has stopped updating
 fails the run even when every step succeeded.
 
 Does NOT run, by design:
     - One-off reference loaders 00_load_* (organisations, postcodes, importers,
       selfservice) — re-run manually only when their source data changes.
-    - One-off backfills 04_create_and_backfill_* — the daily syncs (steps 3-4)
+    - One-off backfills 04_create_and_backfill_* — the daily syncs (steps 3 and 5)
       keep those tables fresh.
 
 Usage:
@@ -50,6 +51,7 @@ STEPS = [
     ("Bronze ingest (t01_feed_*)",         "py",  "01_sync_bronze_feeds.py"),
     ("Silver: t02_job_table",              "py",  "build_job_table.py"),
     ("Silver: GA4 events sync (t04)",      "sql", "04_sync_ga4_events.sql"),
+    ("Silver: GA4 id recovery (t04)",      "sql", "04_recover_ga4_entity_ids.sql"),
     ("Silver: GSC daily sync (t04)",       "sql", "04_sync_gsc_daily.sql"),
     ("Gold: t05_enriched_vacancies",       "sql", "05_build_enriched_vacancies.sql"),
     ("Gold: t06_summary_*",                "sql", "06_create_summary_tables.sql"),
