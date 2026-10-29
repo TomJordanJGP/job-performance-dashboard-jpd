@@ -1,4 +1,6 @@
 streamlit>=1.51.0
+Authlib>=1.3.2  # Google sign-in (st.login)
+httpx>=0.27.0  # ...which Authlib's Starlette client needs (not in streamlit[auth])
 pandas>=2.0.0
 numpy>=1.24.0
 google-cloud-bigquery>=3.10.0

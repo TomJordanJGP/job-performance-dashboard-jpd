@@ -16,6 +16,10 @@ st.set_page_config(
 from theme.css import inject_css
 inject_css()
 
+# Staff only: Google sign-in + the staff group, before any data is read (utils/access.py)
+from utils.access import require_staff
+require_staff()
+
 # Import modules
 from theme.components import sidebar_logo, main_logo, sidebar_section_header
 from data.loader import load_all_data, get_data_updated_at, stale_data_warning
