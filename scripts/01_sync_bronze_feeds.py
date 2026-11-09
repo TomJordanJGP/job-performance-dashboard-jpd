@@ -527,7 +527,8 @@ def write_run_log(client, rows):
 # feed JGP runs. Each run reconciles the registry with it before polling, matching
 # on the exact URL:
 #   - a map URL that no registry row has    -> validated, then added as an 'ats'
-#     shape source feed (every map feed uses the ATS layout)
+#     shape source feed (every map feed uses the ATS layout). One with no jobs
+#     yet is skipped with a warning (not a failure) and checked again next run
 #   - an active source feed not in the map  -> retired: no longer polled, but its
 #     Bronze table stays and t02 keeps its vacancies
 #   - a retired source feed back in the map -> reactivated
@@ -692,10 +693,16 @@ def sync_feed_map(client, dry_run):
         # Validate before registering: a feed the ATS parser can't read, or whose
         # jobs lack an <id> (the MERGE key), would insert junk or duplicate rows.
         parsed = parse_ats(fetch_feed(item['name'], item['url']))
+        if not parsed:
+            # In the map but empty: most likely still being set up, not broken.
+            # Warn without failing the run, and check it again next run.
+            announce(f"new feed '{item['name']}' in the feed map has no jobs yet; "
+                     f"not added, will check again next run")
+            continue
         no_id = sum(1 for r in parsed if not r['external_id'])
-        if not parsed or no_id:
-            why = "no jobs" if not parsed else f"{no_id} of {len(parsed)} jobs have no <id>"
-            msg = f"new feed '{item['name']}' in the feed map not added: {why}"
+        if no_id:
+            msg = (f"new feed '{item['name']}' in the feed map not added: "
+                   f"{no_id} of {len(parsed)} jobs have no <id>")
             announce(msg, 'error')
             problems.append(msg)
             continue
