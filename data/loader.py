@@ -353,8 +353,12 @@ def stale_data_warning(updated_at, now=None):
     if age < STALE_AFTER:
         return None
     age_text = f"{age.days} days" if age.days >= 2 else f"{int(age.total_seconds() // 3600)} hours"
-    return (f"This data was last updated {age_text} ago ({updated_at:%d %b %Y, %H:%M} UTC). "
-            "The scheduled refresh may have stopped, so recent activity is missing.")
+    # The age comes from the cached copy on screen, so a newer refresh may already be
+    # in BigQuery: point people at Refresh Data before suggesting anything is broken.
+    return (f"This data was last updated {age_text} ago ({updated_at:%d %b %Y, %H:%M} UTC), "
+            "so it might be out of date. Click **Refresh Data** in the sidebar to load the "
+            "latest. If this message is still here after refreshing, there could be an "
+            "error with the scheduled refresh.")
 
 
 @st.cache_data(ttl=300)
