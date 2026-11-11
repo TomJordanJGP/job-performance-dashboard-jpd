@@ -68,6 +68,11 @@ RUNS_TABLE = f"{BQ_PROJECT}.{BQ_DATASET}.t00_feed_runs"
 # Freshness preflight: a feed whose newest advertised posting date is older than
 # this many days is flagged 'stale' (a warning — never aborts the run).
 FRESHNESS_DAYS = 14
+# ...unless the feed is this small. A single employer with a handful of live jobs
+# (e.g. Falklands, 3 jobs) can go weeks between posts while the feed is healthy;
+# the stale rule is for catching a frozen feed, which only shows on volume. A
+# feed that drops to 0 jobs is still flagged 'empty'.
+FRESHNESS_MIN_JOBS = 20
 
 
 def merge_cfg(feed):
@@ -797,6 +802,9 @@ def main():
             status, msg = 'empty', 'feed returned 0 jobs (check URL?)'
         elif max_date is None:
             status, msg = 'ok', 'no usable posting date'
+        elif (now - max_date).days > FRESHNESS_DAYS and n < FRESHNESS_MIN_JOBS:
+            status, msg = 'ok', (f"newest post {(now - max_date).days}d old; under "
+                                 f"{FRESHNESS_MIN_JOBS} jobs, so not flagged stale")
         elif (now - max_date).days > FRESHNESS_DAYS:
             status, msg = 'stale', f"newest post {(now - max_date).days}d old (> {FRESHNESS_DAYS}d)"
         else:
@@ -805,7 +813,10 @@ def main():
 
         locs = sum(len(r['locations']) for r in rows)
         fresh = max_date.strftime('%Y-%m-%d') if max_date else 'n/a'
-        flag = '' if status == 'ok' else f"   <-- {status.upper()}: {msg}"
+        if status != 'ok':
+            flag = f"   <-- {status.upper()}: {msg}"
+        else:
+            flag = f"   ({msg})" if msg else ''
         if feed['feed_kind'] == 'appcast':
             ent = sum(1 for r in rows if r.get('entity_id'))
             link = f"entity_id {_pct(ent, n)}"
