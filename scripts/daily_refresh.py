@@ -84,8 +84,8 @@ SOFT_FAIL_EXIT = 2
 # Freshness guard. A run can finish green while a source has quietly stopped
 # updating: the upstream GA4 tables froze on 2026-08-26 and nothing flagged it for
 # a month. After the rebuild, each source's newest data is compared with how far
-# behind it normally runs; a source past its limit fails the run, so GitHub emails
-# the workflow owner. Entries: (label, SQL returning DATE `newest`, max age in days).
+# behind it normally runs; a source past its limit fails the run, which posts a
+# Slack alert. Entries: (label, SQL returning DATE `newest`, max age in days).
 FRESHNESS_CHECKS = [
     # The GA4 source is rebuilt once a day at ~06:30 UTC up to D-2, so runs before
     # then see D-3 as the newest day.
@@ -110,6 +110,17 @@ FRESHNESS_CHECKS = [
     ("ATS API (clean run)",
      f"SELECT DATE(MAX(run_ts)) AS newest FROM `{JPD}.t00_ats_runs` WHERE ok", 2),
 ]
+
+# Likely cause of a stale source: shown under it in the log, and once after the
+# stale lines on the run page and Slack alert.
+_GA4_HINT = ("Google's GA4 daily export running late, not this pipeline. If "
+             "`jobsgopublic.analytics_484716628` (JGP) / `analytics_489117631` (LG) have only "
+             "events_intraday_* tables for the missing days, it clears once Google catches up")
+FRESHNESS_HINTS = {
+    "GA4 events": _GA4_HINT,
+    "On-site impr. JGP": _GA4_HINT,
+    "On-site impr. LG Jobs": _GA4_HINT,
+}
 
 # A known, owned staleness can be made warn-only until a date, e.g.
 # {"GA4 events": date(2026, 10, 13)}, so it doesn't turn every run red and bury new
@@ -140,6 +151,7 @@ def check_freshness(client):
             results.append((label, f"newest {newest}, {age}d old (limit {max_age}d)", age <= max_age))
 
     failing = []
+    hints = {}  # hint -> annotation level, in first-seen order
     for label, detail, fresh in results:
         if fresh:
             print(f"  {label:22s} {detail}")
@@ -148,12 +160,24 @@ def check_freshness(client):
         warn_only = warn_until is not None and today < warn_until
         print(f"  {label:22s} {detail}  <-- STALE"
               + (f" (warning only until {warn_until})" if warn_only else ""))
-        if os.environ.get("GITHUB_ACTIONS") == "true":
-            # Annotation, so it shows on the run's summary page, not just in the log.
-            print(f"::{'warning' if warn_only else 'error'}::{label} is stale: {detail}")
+        hint = FRESHNESS_HINTS.get(label)
+        if hint:
+            print(f"  {'':22s} (likely cause: {hint})")
+        # Annotation, so it shows on the run's summary page and in the Slack alert.
+        annotate("warning" if warn_only else "error", f"{label} is stale: {detail}")
+        if hint and hints.get(hint) != "error":
+            hints[hint] = "warning" if warn_only else "error"
         if not warn_only:
             failing.append(label)
+    for hint, level in hints.items():
+        annotate(level, f"Likely cause: {hint}")
     return failing
+
+
+def annotate(level, message):
+    """On GitHub, add an error/warning annotation (shown on the run page and in the Slack alert)."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print(f"::{level}::{message}")
 
 
 def run_sql(client, filename, dry_run):
@@ -214,10 +238,16 @@ def main():
                 else run_py(target, args.dry_run)
         except subprocess.CalledProcessError as e:
             print(f"  FAILED (exit {e.returncode}) — stopping pipeline.")
+            annotate("error", f"{label} ({target}) failed with exit {e.returncode}; "
+                              "later steps did not run")
             sys.exit(1)
         except Exception as e:
             print(f"  FAILED — {type(e).__name__}: {e}")
             print("  stopping pipeline.")
+            # First line only: BigQuery appends job IDs and query text after it.
+            first = str(e).strip().splitlines()[0][:300] if str(e).strip() else ""
+            annotate("error", f"{label} ({target}) failed: {type(e).__name__}: {first}; "
+                              "later steps did not run")
             sys.exit(1)
         if soft:
             soft_failures.append(label)
@@ -234,6 +264,8 @@ def main():
     if stale:
         print(f"STALE: {len(stale)} source(s) past their freshness limit: {', '.join(stale)}")
     if soft_failures or stale:
+        if soft_failures and not args.dry_run:
+            annotate("error", f"Completed with errors: {', '.join(soft_failures)} (see that step's log)")
         if args.dry_run:
             print("A live run would be marked failed.")
             return
