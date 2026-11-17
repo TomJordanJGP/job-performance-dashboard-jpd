@@ -16,7 +16,9 @@ Which feeds: every source feed that isn't `excluded` and has a Bronze table.
 That includes RETIRED feeds (active = FALSE, dropped out of the feed map), so
 their vacancies keep their salary/dates in t02. A retired feed's rows are frozen,
 so in the dedupe it ranks below every live feed (priority + RETIRED_PRIORITY_OFFSET):
-a vacancy that moved to a new feed takes the live row, not the stale one.
+a vacancy that moved to a new feed takes the live row, not the stale one. The same
+goes for a move between two live feeds: a feed whose latest load still has the
+vacancy beats one it has left, whatever their priorities.
 
 The same feed list also defines the view t01_source_feeds (source_feed,
 external_id, entity_id, last_seen, frontends), which 06_create_summary_tables.sql
@@ -135,14 +137,15 @@ def build_sql(feeds):
 
     with open(SQL_TEMPLATE) as fh:
         tmpl = fh.read()
-    for ph in ("{{SOURCE_UNION}}", "{{SOURCE_PRIORITY_CASE}}"):
+    for ph in ("{{SOURCE_UNION}}", "{{SOURCE_PRIORITY_CASE}}", "{{RETIRED_PRIORITY_OFFSET}}"):
         count = tmpl.count(ph)
         if count != 1:
             sys.exit(f"Template placeholder {ph} must appear exactly once in "
                      f"02_build_job_table.sql (found {count}) — a stray copy in a "
                      f"comment would get the generated SQL injected into it.")
     return (tmpl.replace("{{SOURCE_UNION}}", union)
-                .replace("{{SOURCE_PRIORITY_CASE}}", case))
+                .replace("{{SOURCE_PRIORITY_CASE}}", case)
+                .replace("{{RETIRED_PRIORITY_OFFSET}}", str(RETIRED_PRIORITY_OFFSET)))
 
 
 def main():

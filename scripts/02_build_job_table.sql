@@ -11,10 +11,12 @@
 --   - Appcast-only : in Appcast, no source feed          (~2)
 --   - source-only  : in a source feed, not yet in Appcast (~26 — entity_id NULL until Jobiqo registers it)
 --
--- Source-feed priority for defensive dedupe (feeds are mutually exclusive
--- by design — this only fires if two feeds ever broadcast the same id): the
+-- When two source feeds have the same id, the row comes from a feed that
+-- still carries the job (it was in that feed's latest load), then by the
 -- registry `priority` (ATS first; auto-added feeds after the existing ones),
--- with every retired feed ranked below every live one.
+-- with every retired feed ranked below every live one. Jobs do move between
+-- feeds: on 16 Nov 2026 ~1,000 left ATS for Jgp Ats Organic Feed, and ranking
+-- on priority alone kept serving ATS's copy, frozen the day they left.
 -- A duplicate detection query is included at the bottom (commented).
 --
 -- Run:  bq query --use_legacy_sql=false < scripts/02_build_job_table.sql
@@ -60,22 +62,30 @@ source_union AS (
 ),
 
 -- ---------------------------------------------------------------------------
--- 2. Pick ONE source row per external_id via priority. Mutually exclusive by
---    design, so rn=1 will be the only row 99.9% of the time.
+-- 2. Pick ONE source row per external_id: a live feed that still carries the
+--    job first, then priority. Most ids are in one feed only, so rn=1 is
+--    usually the only row. Every row a feed's run loads gets last_seen = that
+--    run's timestamp, so "in the feed's latest load" is an exact match.
 -- ---------------------------------------------------------------------------
 source_rows AS (
-  SELECT * EXCEPT(rn)
+  SELECT * EXCEPT(rn, feed_rank, in_latest_load)
   FROM (
     SELECT
       *,
       ROW_NUMBER() OVER (
         PARTITION BY external_id
-        ORDER BY CASE source_feed
-{{SOURCE_PRIORITY_CASE}}
-        END
+        ORDER BY (in_latest_load AND feed_rank < {{RETIRED_PRIORITY_OFFSET}}) DESC, feed_rank
       ) AS rn
-    FROM source_union
-    WHERE external_id IS NOT NULL
+    FROM (
+      SELECT
+        *,
+        CASE source_feed
+{{SOURCE_PRIORITY_CASE}}
+        END AS feed_rank,
+        IFNULL(last_seen = MAX(last_seen) OVER (PARTITION BY source_feed), FALSE) AS in_latest_load
+      FROM source_union
+      WHERE external_id IS NOT NULL
+    )
   )
   WHERE rn = 1
 ),
