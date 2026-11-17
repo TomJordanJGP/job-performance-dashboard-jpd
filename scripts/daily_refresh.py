@@ -134,7 +134,8 @@ def check_freshness(client):
     results = []  # (label, detail, is_fresh)
 
     # Every feed in the latest ingest must be 'ok'. The Bronze step only logs
-    # 'empty' and 'stale' feeds, so without this they'd pass silently.
+    # 'failed' (download), 'empty' (a 20+ job feed with none) and 'stale' feeds,
+    # so without this they'd pass silently. A small feed that ran dry is 'ok'.
     feeds = list(client.query(
         f"SELECT feed_name, status FROM `{JPD}.t00_feed_runs` "
         f"WHERE run_ts = (SELECT MAX(run_ts) FROM `{JPD}.t00_feed_runs`)").result())

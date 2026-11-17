@@ -16,7 +16,8 @@ the BQ console):
   - t00_feed_runs : append-only log. One row per (feed, run) written by
     01_sync_bronze_feeds.py — when each feed was polled, how many jobs it
     returned, how many rows merged, the feed's own max date, and a status.
-    Lets you spot a feed that's gone stale or empty.
+    Lets you spot a feed that's gone stale or empty. Status is ok, stale,
+    empty (a 20+ job feed returned none), failed (download) or error (MERGE).
 
 Idempotent: re-running creates nothing that already exists and re-seeds nothing
 that's already populated.

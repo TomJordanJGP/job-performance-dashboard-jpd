@@ -70,9 +70,16 @@ RUNS_TABLE = f"{BQ_PROJECT}.{BQ_DATASET}.t00_feed_runs"
 FRESHNESS_DAYS = 14
 # ...unless the feed is this small. A single employer with a handful of live jobs
 # (e.g. Falklands, 3 jobs) can go weeks between posts while the feed is healthy;
-# the stale rule is for catching a frozen feed, which only shows on volume. A
-# feed that drops to 0 jobs is still flagged 'empty'.
+# the stale rule is for catching a frozen feed, which only shows on volume.
 FRESHNESS_MIN_JOBS = 20
+# The same size limit decides what an empty feed means. A feed that downloads
+# fine with no jobs is flagged 'empty' (fails the run) only if its last load
+# with jobs had at least FRESHNESS_MIN_JOBS: a big feed doesn't empty overnight,
+# but a single employer's feed runs dry when its last vacancy closes (Falklands,
+# 2 -> 0 on 16 Nov 2026). A download that fails is 'failed' whatever its size.
+# A small feed dry for this many days gets a warning (not a failure) suggesting
+# it be excluded.
+DRY_WARN_DAYS = 60
 
 
 def merge_cfg(feed):
@@ -387,17 +394,24 @@ def safe_error(e):
     return f"{type(e).__name__}" + (f" (HTTP {status})" if status else "")
 
 
+class FetchFailed(Exception):
+    """A feed couldn't be downloaded or read as XML. The message is URL-free."""
+
+
 def fetch_feed(feed_name, url):
+    """The feed's <job> elements; [] is a feed with no jobs. Raises FetchFailed
+    if the download or XML parse fails, so a broken feed isn't taken for an
+    empty one."""
     print(f"  Fetching {feed_name}...", end=' ', flush=True)
     try:
         resp = requests.get(url, timeout=180)
         resp.raise_for_status()
         jobs = ET.fromstring(resp.content).findall('.//job')
-        print(f"{len(jobs):,} jobs ({len(resp.content) / 1e6:.1f} MB)")
-        return jobs
     except Exception as e:
         print(f"FAILED: {safe_error(e)}")
-        return []
+        raise FetchFailed(safe_error(e)) from None
+    print(f"{len(jobs):,} jobs ({len(resp.content) / 1e6:.1f} MB)")
+    return jobs
 
 
 def ensure_target(client, feed, content_schema):
@@ -697,7 +711,13 @@ def sync_feed_map(client, dry_run):
     for item in plan['add']:
         # Validate before registering: a feed the ATS parser can't read, or whose
         # jobs lack an <id> (the MERGE key), would insert junk or duplicate rows.
-        parsed = parse_ats(fetch_feed(item['name'], item['url']))
+        try:
+            parsed = parse_ats(fetch_feed(item['name'], item['url']))
+        except FetchFailed as e:
+            # Not registered yet, so nothing relies on it: warn and retry next run.
+            announce(f"new feed '{item['name']}' in the feed map could not be downloaded "
+                     f"({e}); not added, will check again next run")
+            continue
         if not parsed:
             # In the map but empty: most likely still being set up, not broken.
             # Warn without failing the run, and check it again next run.
@@ -747,6 +767,29 @@ def sync_feed_map(client, dry_run):
     return prefetched, planned, problems
 
 
+def last_loads_with_jobs(client):
+    """feed_name -> (run_ts, jobs_fetched) of the feed's latest run that had jobs."""
+    return {r.feed_name: (r.run_ts, r.jobs_fetched) for r in client.query(
+        f"SELECT feed_name, run_ts, jobs_fetched FROM `{RUNS_TABLE}` WHERE jobs_fetched > 0 "
+        "QUALIFY ROW_NUMBER() OVER (PARTITION BY feed_name ORDER BY run_ts DESC) = 1").result()}
+
+
+def empty_feed_status(name, last, now):
+    """(status, message, warning or None) for a feed that downloaded with 0 jobs.
+    `last` is (run_ts, jobs) of its latest load with jobs, or None."""
+    if last is None or last[1] >= FRESHNESS_MIN_JOBS:
+        had = f"last load had {last[1]:,}" if last else "no earlier load had jobs"
+        return 'empty', f"feed returned 0 jobs; {had} (check URL?)", None
+    days = (now - last[0]).days
+    msg = (f"no open jobs since {last[0]:%Y-%m-%d} (last load had {last[1]}); "
+           f"under {FRESHNESS_MIN_JOBS} jobs, so not flagged empty")
+    warning = None
+    if days >= DRY_WARN_DAYS:
+        warning = (f"{name} has had no jobs for {days} days; if the employer has gone, "
+                   f"set excluded = TRUE on its t00_feed_registry row")
+    return 'ok', msg, warning
+
+
 def main():
     ap = argparse.ArgumentParser(
         description='Bronze upsert ingest into JPD.t01_feed_* (registry-driven)')
@@ -773,6 +816,7 @@ def main():
 
     # Fetch + parse every active feed
     frames = {}
+    fetch_errors = {}  # feed_name -> URL-free reason its download failed
     print("\nFetching + parsing feeds...")
     for feed in feeds:
         if feed['feed_name'] in prefetched:    # fetched + parsed while validating it
@@ -783,7 +827,11 @@ def main():
             print(f"  {feed['feed_name']}: no parser for shape '{feed['shape']}' — skipped")
             frames[feed['feed_name']] = []
             continue
-        frames[feed['feed_name']] = parser(fetch_feed(feed['feed_name'], feed['url']))
+        try:
+            frames[feed['feed_name']] = parser(fetch_feed(feed['feed_name'], feed['url']))
+        except FetchFailed as e:
+            fetch_errors[feed['feed_name']] = str(e)
+            frames[feed['feed_name']] = []
 
     # Preflight: status per feed + report
     print(f"\n{'='*72}\nPreflight | rows | entity_id / Appcast linkage | freshness\n{'='*72}")
@@ -793,13 +841,19 @@ def main():
             appcast_ids = {r['external_id'] for r in frames[f['feed_name']] if r.get('external_id')}
             break
     now = datetime.now(timezone.utc)
+    last_with_jobs = last_loads_with_jobs(client)
+    dry_warnings = []
     statuses = {}     # feed_name -> {status, message, max_date}
     for feed in feeds:
         name, rows = feed['feed_name'], frames[feed['feed_name']]
         n = len(rows)
         max_date = feed_max_date(feed['shape'], rows)
-        if n == 0:
-            status, msg = 'empty', 'feed returned 0 jobs (check URL?)'
+        if name in fetch_errors:
+            status, msg = 'failed', f"download failed: {fetch_errors[name]}"
+        elif n == 0:
+            status, msg, warning = empty_feed_status(name, last_with_jobs.get(name), now)
+            if warning:
+                dry_warnings.append(warning)
         elif max_date is None:
             status, msg = 'ok', 'no usable posting date'
         elif (now - max_date).days > FRESHNESS_DAYS and n < FRESHNESS_MIN_JOBS:
@@ -824,10 +878,12 @@ def main():
             matched = sum(1 for r in rows if r.get('external_id') in appcast_ids)
             link = f"in Appcast {_pct(matched, n)}"
         print(f"  {name:14s} {n:6,} rows | {link:18s} | newest {fresh} | locs {locs:,}{flag}")
+    for warning in dry_warnings:
+        announce(warning)
 
-    empty_feeds = [n for n, s in statuses.items() if s['status'] == 'empty']
+    empty_feeds = [n for n, s in statuses.items() if s['status'] in ('empty', 'failed')]
     if args.strict and empty_feeds:
-        print(f"\n[STRICT] Aborting — feed(s) returned 0 jobs: {', '.join(empty_feeds)}")
+        print(f"\n[STRICT] Aborting — feed(s) empty or not downloaded: {', '.join(empty_feeds)}")
         if not args.dry_run:
             write_run_log(client, [{
                 'run_ts': run_ts, 'feed_name': f['feed_name'], 'url': f['url'],
@@ -844,7 +900,7 @@ def main():
         total = sum(len(d) for d in frames.values())
         print(f"\n[DRY RUN] No writes. Parsed {total:,} rows across {len(feeds)} feeds.")
         if empty_feeds:
-            print(f"[DRY RUN] Would warn on empty feed(s): {', '.join(empty_feeds)}")
+            print(f"[DRY RUN] Would fail on empty or undownloaded feed(s): {', '.join(empty_feeds)}")
         if map_problems:
             print(f"[DRY RUN] Would flag {len(map_problems)} feed-map problem(s) (exit 2)")
         print(f"Completed in {(datetime.now() - start).total_seconds():.0f}s")
