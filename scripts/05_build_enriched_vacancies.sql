@@ -25,6 +25,10 @@
 --     fallback — NULL where t02 has no row (orphan events).
 --   * GA4-only fields (device, browser, campaign, page_*, etc.): NULL on
 --     metadata_only rows.
+--   * Organisation corrections (t00_org_corrections, the 2026-11-18 clean-up of duplicate
+--     organisations) win over both: merged/renamed vacancies take the corrected ID + name,
+--     removed ones are dropped. Keyed on entity_id, so closed vacancies stay corrected; new
+--     vacancies are fixed on the Jobiqo front end instead.
 --   * t02's _source provenance columns are NOT carried into t05 — they describe
 --     t02's internal source-of-truth decisions, which would be confusing
 --     alongside the separate t02-vs-t04 hybrid logic above. Query t02 directly
@@ -56,8 +60,9 @@ SELECT
 
   -- Hybrid fields: t02 wins when present, else fall back to t04
   COALESCE(j.title, e.title)                                       AS title,
-  COALESCE(j.organization_name, e.organization_name)               AS organization_name,
-  COALESCE(j.organization_id, CAST(e.organization_id AS STRING))   AS organization_id,
+  COALESCE(oc.organization_name, j.organization_name, e.organization_name) AS organization_name,
+  COALESCE(CAST(oc.organization_id AS STRING), j.organization_id,
+           CAST(e.organization_id AS STRING))                      AS organization_id,
   COALESCE(j.category, e.occupations)                              AS category,
 
   -- t02-only fields (NULL for orphan events)
@@ -180,6 +185,8 @@ LEFT JOIN (
   GROUP BY name_key
 ) AS orgs_event_name_region
   ON LOWER(TRIM(e.organization_name)) = orgs_event_name_region.name_key
+LEFT JOIN `site-monitoring-421401.JPD.t00_org_corrections` AS oc
+  ON CAST(e.entity_id AS STRING) = oc.entity_id
 
 -- Exclude known test/demo vacancies. These entity_ids (Test.inc, Google, Dropbox,
 -- GM, Exxon, stripe test, etc.) exist only as orphan GA4 events — no t02 row — so
@@ -187,8 +194,11 @@ LEFT JOIN (
 -- re-pulled by the next GA4 sync; this filter survives every rebuild.
 -- The IS NULL arm keeps events GA4 sent without an entity_id: `NULL NOT IN (...)` is
 -- NULL, so without it they silently vanished from every t06 table, daily totals included.
-WHERE e.entity_id IS NULL
-   OR CAST(e.entity_id AS STRING) NOT IN ('20', '23', '28', '29', '40', '62', '65', '77')
+-- Vacancies marked "Removed" in the organisation clean-up (JGP's own and test posts)
+-- are dropped the same way.
+WHERE (e.entity_id IS NULL
+       OR CAST(e.entity_id AS STRING) NOT IN ('20', '23', '28', '29', '40', '62', '65', '77'))
+  AND oc.action IS DISTINCT FROM 'remove'
 
 UNION ALL
 
@@ -211,8 +221,8 @@ SELECT
   j.external_id,
 
   j.title,
-  j.organization_name,
-  j.organization_id,
+  COALESCE(oc.organization_name, j.organization_name)              AS organization_name,
+  COALESCE(CAST(oc.organization_id AS STRING), j.organization_id)  AS organization_id,
   j.category,
 
   j.source_feed,
@@ -253,4 +263,7 @@ LEFT JOIN (
   WHERE entity_id IS NOT NULL
 ) AS has_events
   ON j.entity_id = has_events.entity_id_str
-WHERE has_events.entity_id_str IS NULL;
+LEFT JOIN `site-monitoring-421401.JPD.t00_org_corrections` AS oc
+  ON j.entity_id = oc.entity_id
+WHERE has_events.entity_id_str IS NULL
+  AND oc.action IS DISTINCT FROM 'remove';
